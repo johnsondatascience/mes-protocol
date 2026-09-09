@@ -1,0 +1,15 @@
+# market data never gets committed — licensing, size, and it goes stale
+data/*
+!data/.gitkeep
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+.env

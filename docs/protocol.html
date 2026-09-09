@@ -1,0 +1,516 @@
+<title>MES Replay Protocol</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@500;600&display=swap">
+<style>
+  :root{
+    --ground:#eaeeef;
+    --surface:#ffffff;
+    --surface-2:#f3f6f6;
+    --ink:#12191d;
+    --ink-2:#3c4a51;
+    --muted:#69797f;
+    --rule:#d0d9db;
+    --rule-2:#e2e9ea;
+    --accent:#0a6a68;
+    --accent-soft:#0a6a681a;
+    --bid:#1c6b45;
+    --ask:#9c2f2f;
+    --warn:#8a5510;
+    --warn-soft:#8a55101a;
+    --shadow:0 1px 2px rgba(18,25,29,.06), 0 8px 24px -16px rgba(18,25,29,.35);
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --ground:#0c1114;
+      --surface:#141b1f;
+      --surface-2:#192227;
+      --ink:#e4ebed;
+      --ink-2:#b3c1c6;
+      --muted:#8798a0;
+      --rule:#26333a;
+      --rule-2:#1e2a30;
+      --accent:#3fb3ac;
+      --accent-soft:#3fb3ac1f;
+      --bid:#4bb582;
+      --ask:#d9736d;
+      --warn:#d3a15a;
+      --warn-soft:#d3a15a1f;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.9);
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#0c1114;
+    --surface:#141b1f;
+    --surface-2:#192227;
+    --ink:#e4ebed;
+    --ink-2:#b3c1c6;
+    --muted:#8798a0;
+    --rule:#26333a;
+    --rule-2:#1e2a30;
+    --accent:#3fb3ac;
+    --accent-soft:#3fb3ac1f;
+    --bid:#4bb582;
+    --ask:#d9736d;
+    --warn:#d3a15a;
+    --warn-soft:#d3a15a1f;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 28px -18px rgba(0,0,0,.9);
+  }
+
+  *{box-sizing:border-box}
+  body{
+    background:var(--ground);
+    color:var(--ink);
+    font-family:"IBM Plex Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    font-size:15.5px;
+    line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:920px;margin:0 auto;padding:0 22px 96px}
+
+  /* ---- masthead ---- */
+  header.mast{
+    padding:52px 0 26px;
+    border-bottom:2px solid var(--ink);
+    margin-bottom:38px;
+  }
+  .kicker{
+    font-family:"IBM Plex Mono",ui-monospace,monospace;
+    font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent);font-weight:600;
+    display:flex;gap:14px;flex-wrap:wrap;align-items:center;
+  }
+  .kicker .dot{width:4px;height:4px;border-radius:50%;background:var(--rule);}
+  h1{
+    font-family:"IBM Plex Serif",Georgia,serif;
+    font-weight:600;font-size:clamp(2.1rem,5.2vw,3.05rem);
+    line-height:1.05;letter-spacing:-.02em;margin:.34em 0 .3em;
+    text-wrap:balance;
+  }
+  .standfirst{font-size:1.06rem;color:var(--ink-2);max-width:63ch;margin:0}
+
+  /* ---- sections ---- */
+  section{margin:0 0 46px}
+  h2{
+    font-family:"IBM Plex Serif",Georgia,serif;
+    font-size:1.42rem;font-weight:600;letter-spacing:-.012em;
+    margin:0 0 6px;text-wrap:balance;
+  }
+  h2 .num{
+    font-family:"IBM Plex Mono",monospace;font-size:.72em;font-weight:500;
+    color:var(--accent);margin-right:.6em;
+  }
+  .sub{color:var(--muted);font-size:.93rem;margin:0 0 18px;max-width:62ch}
+  h3{font-size:1.02rem;font-weight:600;margin:26px 0 8px;letter-spacing:-.005em}
+  p{margin:0 0 14px;max-width:66ch}
+  ul,ol{margin:0 0 14px;padding-left:1.15em;max-width:66ch}
+  li{margin-bottom:6px}
+  strong{font-weight:600}
+  code,.mono{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:.88em}
+  code{background:var(--surface-2);padding:1px 5px;border-radius:3px;color:var(--ink-2)}
+  a{color:var(--accent)}
+  a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  /* ---- callout ---- */
+  .callout{
+    background:var(--warn-soft);
+    border-left:3px solid var(--warn);
+    padding:16px 18px;margin:0 0 22px;border-radius:0 4px 4px 0;
+  }
+  .callout p:last-child{margin-bottom:0}
+  .callout .lbl{
+    font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.12em;
+    text-transform:uppercase;color:var(--warn);font-weight:600;display:block;margin-bottom:5px;
+  }
+
+  /* ---- spec strip ---- */
+  .strip{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+    gap:1px;background:var(--rule);border:1px solid var(--rule);
+    border-radius:4px;overflow:hidden;margin-bottom:22px;
+  }
+  .strip div{background:var(--surface);padding:13px 15px}
+  .strip dt{
+    font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:3px;
+  }
+  .strip dd{
+    margin:0;font-family:"IBM Plex Mono",monospace;font-weight:500;
+    font-size:1.06rem;font-variant-numeric:tabular-nums;
+  }
+
+  /* ---- tables ---- */
+  .tbl-wrap{overflow-x:auto;margin:0 0 20px;border:1px solid var(--rule);border-radius:4px;background:var(--surface)}
+  table{border-collapse:collapse;width:100%;font-size:.9rem}
+  th,td{padding:9px 14px;text-align:left;border-bottom:1px solid var(--rule-2)}
+  thead th{
+    background:var(--surface-2);
+    font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.09em;
+    text-transform:uppercase;color:var(--muted);font-weight:600;white-space:nowrap;
+    border-bottom:1px solid var(--rule);
+  }
+  tbody tr:last-child td{border-bottom:none}
+  td.num,th.num{text-align:right;font-family:"IBM Plex Mono",monospace;font-variant-numeric:tabular-nums}
+  td.mono-c{font-family:"IBM Plex Mono",monospace;font-size:.86rem;white-space:nowrap}
+  tr.hi td{background:var(--accent-soft)}
+
+  /* ---- setup spec blocks ---- */
+  .setup{
+    background:var(--surface);border:1px solid var(--rule);border-radius:5px;
+    margin-bottom:20px;overflow:hidden;box-shadow:var(--shadow);
+  }
+  .setup > header{
+    display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+    padding:15px 20px 13px;border-bottom:1px solid var(--rule);background:var(--surface-2);
+  }
+  .setup .tag{
+    font-family:"IBM Plex Mono",monospace;font-size:11px;font-weight:600;
+    letter-spacing:.06em;color:var(--accent);
+    border:1px solid var(--accent);border-radius:3px;padding:1px 6px;
+  }
+  .setup h3{margin:0;font-size:1.08rem;font-family:"IBM Plex Serif",Georgia,serif;font-weight:600}
+  .setup .freq{
+    margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:11px;
+    color:var(--muted);white-space:nowrap;
+  }
+  .setup .body{padding:18px 20px 6px}
+  .setup .body p{max-width:none}
+  .spec{margin:0 0 4px;display:grid;grid-template-columns:118px 1fr;gap:2px 18px}
+  .spec dt{
+    font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--muted);padding-top:5px;
+  }
+  .spec dd{margin:0 0 12px;font-size:.94rem}
+  .spec dd ul{margin:0;padding-left:1.05em;max-width:none}
+  .spec dd ul li{margin-bottom:3px}
+  @media (max-width:620px){
+    .spec{grid-template-columns:1fr;gap:0}
+    .spec dt{padding-top:10px;margin-bottom:2px}
+  }
+  .fail{
+    border-top:1px solid var(--rule-2);margin-top:8px;padding:12px 20px 14px;
+    background:var(--surface-2);font-size:.9rem;color:var(--ink-2);
+  }
+  .fail b{
+    font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--ask);font-weight:600;display:block;margin-bottom:3px;
+  }
+
+  /* ---- ordered protocol steps ---- */
+  ol.steps{list-style:none;padding:0;margin:0 0 20px;max-width:none;counter-reset:s}
+  ol.steps > li{
+    counter-increment:s;position:relative;padding:0 0 16px 44px;margin:0;
+    border-left:1px solid var(--rule);margin-left:11px;
+  }
+  ol.steps > li:last-child{border-left-color:transparent;padding-bottom:0}
+  ol.steps > li::before{
+    content:counter(s,decimal-leading-zero);
+    position:absolute;left:-11px;top:0;width:22px;height:22px;border-radius:50%;
+    background:var(--accent);color:#fff;
+    font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:600;
+    display:flex;align-items:center;justify-content:center;
+  }
+  ol.steps > li p{margin:0 0 4px}
+  ol.steps > li .h{font-weight:600;display:block;margin-bottom:2px}
+
+  /* ---- code ---- */
+  pre{
+    background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+    padding:14px 16px;overflow-x:auto;font-family:"IBM Plex Mono",monospace;
+    font-size:12.4px;line-height:1.55;color:var(--ink-2);margin:0 0 18px;
+  }
+  pre .c{color:var(--muted)}
+
+  footer{
+    border-top:1px solid var(--rule);margin-top:52px;padding-top:20px;
+    font-size:.86rem;color:var(--muted);max-width:66ch;
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <div class="kicker">
+    <span>Micro E-mini S&amp;P 500</span><span class="dot"></span>
+    <span>Optimus Flow Market Replay</span><span class="dot"></span>
+    <span>Pre-registered</span>
+  </div>
+  <h1>MES Replay Protocol</h1>
+  <p class="standfirst">Five order-flow setups written as mechanical rules, with the logging schema, futility gates and sample-size math needed to tell a real edge from a run of luck. Pre-register before you replay; the rules are what's being tested, not your judgment on the day.</p>
+</header>
+
+<section>
+  <h2><span class="num">01</span>The number that governs everything</h2>
+  <p class="sub">Read this before designing anything else, because it determines how many setups you can honestly evaluate.</p>
+
+  <div class="callout">
+    <span class="lbl">Design constraint</span>
+    <p>A 1:2 R system with a 40% win rate has an R-multiple standard deviation near <strong>1.5</strong>. At that dispersion, confirming a genuinely good edge of +0.25R takes roughly <strong>360 trades</strong> at 80% power with the multiple-comparison correction applied. A marginal +0.15R edge takes over a thousand. You cannot confirm five setups. You can <em>screen</em> five and confirm one.</p>
+  </div>
+
+  <p>So the protocol is asymmetric by design. Rejection is cheap and fast; confirmation is expensive and reserved for the one or two survivors. That is not a compromise — it is the only structure the variance permits.</p>
+
+  <h3>Trades needed to confirm, 80% power</h3>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>True expectancy</th>
+        <th class="num">σ = 1.2 R</th>
+        <th class="num">σ = 1.5 R</th>
+        <th>Read</th>
+      </tr></thead>
+      <tbody>
+        <tr><td class="mono-c">+0.10 R</td><td class="num">1,445</td><td class="num">2,261</td><td>Not testable in a human lifetime of replay</td></tr>
+        <tr><td class="mono-c">+0.15 R</td><td class="num">642</td><td class="num">1,004</td><td>~2 years of replay at 2 trades/session</td></tr>
+        <tr class="hi"><td class="mono-c">+0.25 R</td><td class="num">231</td><td class="num">361</td><td>Realistic target: ~180 sessions</td></tr>
+        <tr><td class="mono-c">+0.40 R</td><td class="num">90</td><td class="num">141</td><td>Obvious enough to see quickly</td></tr>
+        <tr><td class="mono-c">+0.60 R</td><td class="num">40</td><td class="num">63</td><td>If you see this, suspect a logging error first</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="sub" style="margin-top:-8px">One-sided test at α = 0.01 (Bonferroni: 0.05 ÷ 5 setups). Normal-theory approximation — use it for planning, and the session-block bootstrap for the actual verdict.</p>
+</section>
+
+<section>
+  <h2><span class="num">02</span>Cost floor</h2>
+  <p class="sub">MES contract mechanics, and what they do to tight stops.</p>
+
+  <dl class="strip">
+    <div><dt>Point value</dt><dd>$5.00</dd></div>
+    <div><dt>Tick (0.25)</dt><dd>$1.25</dd></div>
+    <div><dt>Round turn</dt><dd>≈$1.30</dd></div>
+    <div><dt>Cost in points</dt><dd>0.51</dd></div>
+  </dl>
+
+  <p>Model every round turn at <strong>0.26 points of commission and fees plus one tick of slippage on stop exits</strong> — 0.51 points total. Expressed in R, that cost is a fixed tax that scales inversely with your stop:</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Initial stop</th><th class="num">Risk / contract</th><th class="num">Cost as % of 1R</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td class="mono-c">1.0 pt</td><td class="num">$5</td><td class="num">51.0%</td><td>Unwinnable</td></tr>
+        <tr><td class="mono-c">3.0 pt</td><td class="num">$15</td><td class="num">17.0%</td><td>Needs a very large raw edge</td></tr>
+        <tr><td class="mono-c">4.0 pt</td><td class="num">$20</td><td class="num">12.8%</td><td>Tight end of workable</td></tr>
+        <tr class="hi"><td class="mono-c">6.0 pt</td><td class="num">$30</td><td class="num">8.5%</td><td>Reasonable target zone</td></tr>
+        <tr><td class="mono-c">10.0 pt</td><td class="num">$50</td><td class="num">5.1%</td><td>Costs negligible; sizing becomes the constraint</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>This is why the setups below carry stop <em>floors</em> as well as caps. A four-tick scalp is not a strategy with a small edge — it is a strategy that hands half its edge to the exchange before the trade starts.</p>
+
+  <p><strong>Read ES, trade MES.</strong> The micro book is thinner and its footprint clusters are correspondingly noisier. Every order-flow condition below is evaluated on the ES chart and ES DOM; MES is the execution vehicle only.</p>
+</section>
+
+<section>
+  <h2><span class="num">03</span>Replay discipline</h2>
+  <p class="sub">The rules that keep Market Replay from quietly becoming hindsight confirmation.</p>
+
+  <ol class="steps">
+    <li><span class="h">Draw dates from a pre-committed pool.</span><p>Randomly sample sessions across at least three different volatility regimes. Never replay a date you traded live or already reviewed — you will remember the outcome and you will not notice that you remember it.</p></li>
+    <li><span class="h">Start the tape at 09:00 ET, not at the setup.</span><p>Load the session cold. No scrolling ahead, no glancing at the daily bar, no checking where the close landed. If the chart shows one bar past the current one, the session is contaminated — discard it.</p></li>
+    <li><span class="h">Replay at 1× to 2×, and place real orders through the DOM.</span><p>Speed suppresses the hesitation that costs you fills live. Use bracket orders with the same defaults you would use with money on.</p></li>
+    <li><span class="h">One decision per bar, no re-runs.</span><p>If you pause to think, the bar is over. Rewinding to re-take a trade invalidates the session for the entire study, not just that trade.</p></li>
+    <li><span class="h">Log a mechanical exit alongside your managed exit.</span><p>Record the fixed 1:2 outcome for <em>every</em> trade regardless of how you actually managed it. The mechanical series is what the statistics run on; the managed series measures your discretion, and mixing them makes both unreadable.</p></li>
+    <li><span class="h">Mark the first 30 trades of each setup as burn-in.</span><p>Your reading skill is non-stationary across a six-month study — the early trades and late trades are not draws from the same distribution. Pre-register the burn-in exclusion now so it isn't a post-hoc convenience later.</p></li>
+  </ol>
+</section>
+
+<section>
+  <h2><span class="num">04</span>Trade log schema</h2>
+  <p class="sub">One row per trade. R is computed from the log, never typed in by hand — self-reported R is where optimism enters the data.</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Field</th><th>Type</th><th>Why it's there</th></tr></thead>
+      <tbody>
+        <tr><td class="mono-c">trade_id</td><td>int</td><td>Join key</td></tr>
+        <tr><td class="mono-c">session_date</td><td>date</td><td>Bootstrap blocking unit — trades within a session are correlated</td></tr>
+        <tr><td class="mono-c">setup</td><td>enum</td><td>IB_BREAK · LEVEL2LEVEL · VWAP_CONT · ABSORPTION · ON_INVENTORY</td></tr>
+        <tr><td class="mono-c">direction</td><td>LONG/SHORT</td><td>Checks for a directional bias in your reads</td></tr>
+        <tr><td class="mono-c">entry_time</td><td>HH:MM:SS ET</td><td>Time-of-day conditioning</td></tr>
+        <tr><td class="mono-c">entry_px, stop_px</td><td>float</td><td>Defines R. Stop is the bracket as placed, never as later moved</td></tr>
+        <tr><td class="mono-c">exit_px, exit_reason</td><td>float, enum</td><td>TARGET · STOP · TIME · MANUAL · BREAKEVEN</td></tr>
+        <tr><td class="mono-c">mech_exit_R</td><td>float</td><td>The fixed 1:2 outcome, logged for every trade</td></tr>
+        <tr class="hi"><td class="mono-c">day_type</td><td>enum</td><td>TREND_UP · TREND_DOWN · BALANCE · DOUBLE_DIST — classified at 11:00 ET, never at the close</td></tr>
+        <tr><td class="mono-c">ib_range_pts</td><td>float</td><td>Regime covariate; also the S1 filter</td></tr>
+        <tr><td class="mono-c">on_range_pos</td><td>0–1</td><td>Where 09:30 sat in the overnight range — the S5 covariate</td></tr>
+        <tr class="hi"><td class="mono-c">checklist_ok</td><td>0/1</td><td>Did every pre-registered condition hold? Zeros are excluded from the primary analysis: they measure discipline, not the setup</td></tr>
+        <tr><td class="mono-c">grade</td><td>A/B/C</td><td>Your execution quality, separate from the setup's quality</td></tr>
+        <tr><td class="mono-c">notes</td><td>str</td><td>One line. Screenshot filename if you keep them</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>Classify <code>day_type</code> at 11:00 ET.</strong> Classifying at the close is the single most seductive error available here — it makes every day-type-conditional result look brilliant and none of it survives live, because live you must classify in real time.</p>
+</section>
+
+<section>
+  <h2><span class="num">05</span>The five setups</h2>
+  <p class="sub">Every condition is binary and checkable on the tape. If a condition requires a judgment call you can't write down, it isn't a condition — it's a hope, and it belongs in <code>notes</code>.</p>
+
+  <article class="setup">
+    <header><span class="tag">S1</span><h3>Initial balance break and retest</h3><span class="freq">≈1.2 / session</span></header>
+    <div class="body">
+      <p><em>Hypothesis:</em> the 09:30–10:00 ET range establishes early accepted value. A break that survives a retest indicates inventory being repriced rather than a liquidity probe — and the stops resting beyond the IB are the fuel.</p>
+      <dl class="spec">
+        <dt>Trigger</dt><dd><ul>
+          <li>IB range between 0.25% and 0.75% of index level — excludes both dead and blown-out openings</li>
+          <li>Break occurs between 10:00 and 11:30 ET</li>
+          <li>ES cumulative delta makes a new session extreme in the break direction within 3 bars of the break</li>
+          <li>Retest holds the IB edge for one full volume bar without closing back inside by more than 2 points</li>
+        </ul></dd>
+        <dt>Entry</dt><dd>Limit at the IB edge ± 1 tick, on the retest only. No chasing the initial break.</dd>
+        <dt>Stop</dt><dd>1 point beyond the retest swing. Floor 4 pts, cap 8 pts — if structure demands more than 8, stand down.</dd>
+        <dt>Target</dt><dd>Mechanical series: 2R. Managed: half at 1R, runner to IB edge + 1.0 × IB range or a session VWAP break.</dd>
+        <dt>Stand down</dt><dd>FOMC / CPI / NFP days before 10:30 ET. Gap opens beyond 1% of prior close — log separately, different regime.</dd>
+      </dl>
+    </div>
+    <div class="fail"><b>Known failure mode</b>The false break that reverses back through the entire IB. Log those as <code>IB_FAIL</code> with the same schema — the mirror trade may carry more edge than the setup itself, and you'll only find out if you record it.</div>
+  </article>
+
+  <article class="setup">
+    <header><span class="tag">S2</span><h3>Value-area edge to VPOC</h3><span class="freq">≈0.7 / session</span></header>
+    <div class="body">
+      <p><em>Hypothesis:</em> on rotational days, responsive participants defend the prior session's value-area edges and price mean-reverts toward the point of control.</p>
+      <dl class="spec">
+        <dt>Trigger</dt><dd><ul>
+          <li>Open inside the prior day's value area — this is the day-type filter, and it is mandatory</li>
+          <li>Price tags prior VAH or VAL after 10:00 ET</li>
+          <li>Footprint absorption: ≥2 consecutive clusters with strong one-way aggression and no new extreme</li>
+          <li>ES DOM shows resting size ≥3× the mean of the surrounding 10 levels, and it does not pull as price arrives</li>
+        </ul></dd>
+        <dt>Entry</dt><dd>Limit 1–2 ticks inside the level, after the <em>second</em> failed push. Never the first.</dd>
+        <dt>Stop</dt><dd>1.5 points beyond the absorption zone extreme, cap 6 pts.</dd>
+        <dt>Target</dt><dd>Prior day's VPOC. Time stop: scratch at breakeven if price hasn't traveled 1R within 20 minutes.</dd>
+        <dt>Stand down</dt><dd>Open outside value. One-timeframing on 30-min bars. Delta trending with price.</dd>
+      </dl>
+    </div>
+    <div class="fail"><b>Known failure mode</b>This bleeds badly on the ~30% of sessions that trend, and the losses cluster — you will take three of them on the same day. The entire question is whether balance-day winners pay for trend-day losses, so <em>every</em> result for S2 must be reported conditional on day type. An unconditional mean here is meaningless.</div>
+  </article>
+
+  <article class="setup">
+    <header><span class="tag">S3</span><h3>VWAP pullback continuation</h3><span class="freq">≈0.6 / session</span></header>
+    <div class="body">
+      <p><em>Hypothesis:</em> on trend days, execution algorithms work large orders around VWAP; pullbacks into it get filled rather than reversed. This is where the large R multiples live.</p>
+      <dl class="spec">
+        <dt>Day gate</dt><dd>All three, confirmed before any entry: open outside prior value; one-timeframing on 30-min bars for 2 consecutive bars; session cumulative delta at a session extreme with price.</dd>
+        <dt>Trigger</dt><dd><ul>
+          <li>Pullback to session VWAP ± 2 points, or to the developing value-area edge</li>
+          <li>Declining volume on the pullback versus the impulse leg</li>
+          <li>Counter-delta on the pullback under 40% of the impulse delta — fading, not reversing</li>
+        </ul></dd>
+        <dt>Entry</dt><dd>Choose one and pre-register it: limit at VWAP, <em>or</em> stop-entry 1 tick beyond the pullback bar's extreme. Mixing them mid-study destroys the sample.</dd>
+        <dt>Stop</dt><dd>Beyond the low-volume node under the pullback. Floor 5 pts, cap 10 pts.</dd>
+        <dt>Target</dt><dd>Mechanical: 2R. Managed: trail on 30-min structure. A fixed 1R target here throws away the setup's entire reason for existing.</dd>
+        <dt>Stand down</dt><dd>After 15:00 ET. Any day where VWAP has been crossed more than 3 times — that's a balance day in a trend costume.</dd>
+      </dl>
+    </div>
+    <div class="fail"><b>Known failure mode</b>Misclassifying a balance day as a trend day in the first hour. The 30-min confirmation is slow on purpose. Anticipating it converts this setup into S2 executed backwards, which is the worst trade on this page.</div>
+  </article>
+
+  <article class="setup">
+    <header><span class="tag">S4</span><h3>HVN absorption reversal</h3><span class="freq">≤1 / session</span></header>
+    <div class="body">
+      <p><em>Hypothesis:</em> a passive participant with real size defends a price level, and aggressive flow exhausts against it. The purest order-flow trade here and the least likely to be real.</p>
+      <dl class="spec">
+        <dt>Trigger</dt><dd><ul>
+          <li>Price at a high-volume node from the prior 5 sessions' composite profile</li>
+          <li>≥3 clusters where one-side aggression exceeds 65% of cluster volume with price advancing under 2 ticks</li>
+          <li>DOM Surface shows the resting size persisting through at least two full refreshes — not a flash</li>
+          <li>Cumulative delta makes a new extreme while price does not</li>
+        </ul></dd>
+        <dt>Entry</dt><dd>Stop-entry 1 tick beyond the first cluster that reverses the imbalance. Never a limit — this setup requires proof, not anticipation.</dd>
+        <dt>Stop</dt><dd>1 point beyond the absorption extreme, cap 5 pts. If it needs more than 5, the read was wrong.</dd>
+        <dt>Target</dt><dd>2R, or the nearest opposing HVN, whichever is closer.</dd>
+        <dt>Stand down</dt><dd>First 5 and last 15 minutes of RTH. Any scheduled release minute. Thin tape manufactures false absorption signatures.</dd>
+      </dl>
+    </div>
+    <div class="fail"><b>Known failure mode</b>Spoofing — displayed size that never trades. The persistence requirement is your only defense and it is an imperfect one. Note also that replay reconstructs the book imperfectly, so S4 is the setup where replay results are <em>least</em> transferable to live. Test it last, and treat a positive result with more suspicion than a negative one.</div>
+  </article>
+
+  <article class="setup">
+    <header><span class="tag">S5</span><h3>Overnight inventory correction</h3><span class="freq">≈0.4 / session</span></header>
+    <div class="body">
+      <p><em>Hypothesis:</em> when the overnight session leaves positioning skewed to one extreme, the RTH open corrects the imbalance before establishing a direction.</p>
+      <dl class="spec">
+        <dt>Trigger</dt><dd><ul>
+          <li>At 09:30, price sits in the top or bottom 15% of the overnight (18:00–09:30 ET) range</li>
+          <li>Overnight volume above the 20-day median — a thin overnight drift is noise, not inventory</li>
+        </ul></dd>
+        <dt>Entry</dt><dd>First 5-minute bar that closes against the extreme, 09:30–10:00 ET only.</dd>
+        <dt>Stop</dt><dd>Beyond the overnight extreme, cap 8 pts.</dd>
+        <dt>Target</dt><dd>Overnight midpoint. Hard time stop at 10:30 ET.</dd>
+        <dt>Stand down</dt><dd>Gap opens entirely beyond the overnight range — that is a different event. 08:30 ET data days.</dd>
+      </dl>
+    </div>
+    <div class="fail"><b>Known failure mode</b>On genuine trend days the "extreme" is the beginning of the move, not a correction. Expect a weak standalone expectancy. <strong>Test S5 as a covariate rather than a strategy:</strong> log <code>on_range_pos</code> on every S1 and S3 trade and check whether overnight positioning predicts their outcomes. A feature that improves two setups is worth more than a marginal sixth strategy.</div>
+  </article>
+</section>
+
+<section>
+  <h2><span class="num">06</span>Gates and stopping rules</h2>
+  <p class="sub">Pre-registered, checked at fixed sample sizes, applied without appeal.</p>
+
+  <p>The gate is a one-sided futility bound: kill the setup when its upper 80% confidence bound on mean R falls below the minimum expectancy worth trading (+0.15R). This rejects dead setups quickly while rarely discarding a live one.</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>Checkpoint</th><th class="num">Kill if mean R below</th>
+        <th class="num">Kills a true +0.25R setup</th><th class="num">Kills a true +0.40R setup</th><th class="num">Kills a true 0R setup</th>
+      </tr></thead>
+      <tbody>
+        <tr><td class="mono-c">n = 60</td><td class="num">−0.013</td><td class="num">8.7%</td><td class="num">1.7%</td><td class="num">47%</td></tr>
+        <tr class="hi"><td class="mono-c">n = 150</td><td class="num">+0.047</td><td class="num">4.9%</td><td class="num">0.2%</td><td class="num">65%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="sub" style="margin-top:-8px">Assumes σ = 1.5R. Roughly one in eight genuinely good setups gets killed across both gates — the price of not spending two years on a mirage.</p>
+
+  <h3>Promotion</h3>
+  <p>A setup passes both gates and reaches the confirmation sample (see §01) before it earns live capital, and then at one contract for 40 sessions regardless of how good the replay numbers look. Replay omits slippage, hesitation, and the specific feeling of watching real money move — none of which are in the sample you just collected.</p>
+
+  <h3>Reporting instrument</h3>
+  <p>R-multiples are right-skewed and clustered within sessions, so normal-theory intervals are wrong twice over. Report the <strong>session-block bootstrap</strong>: resample whole sessions with replacement, recompute the mean, take the 2.5/97.5 percentiles. Trades within one session share a regime and share your state of mind that morning; treating them as independent will make every interval look about 30% tighter than it is.</p>
+</section>
+
+<section>
+  <h2><span class="num">07</span>Sequencing</h2>
+  <p class="sub">Test order is chosen by expected effect size, not by which setup is most interesting.</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th class="num">Order</th><th>Setup</th><th>Why here</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td class="mono-c">S3 VWAP_CONT</td><td>Largest plausible effect and best R structure, so it needs the fewest trades to resolve. Also the easiest day gate to check mechanically.</td></tr>
+        <tr><td class="num">2</td><td class="mono-c">S1 IB_BREAK</td><td>Highest frequency, so the sample accumulates fastest. Collect the <code>IB_FAIL</code> mirror at the same time for free.</td></tr>
+        <tr><td class="num">3</td><td class="mono-c">S2 LEVEL2LEVEL</td><td>Needs day-type conditioning, which needs volume — run it after you've built the classification habit on S3.</td></tr>
+        <tr><td class="num">4</td><td class="mono-c">S5 ON_INVENTORY</td><td>Free: the covariate is already logged on every S1 and S3 trade. Evaluate as a feature first.</td></tr>
+        <tr><td class="num">5</td><td class="mono-c">S4 ABSORPTION</td><td>Last. Highest skill requirement, worst replay fidelity, most likely to be a mirage. Your reading also improves most while you study it, which confounds the sample.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p>Run one setup at a time. Running all five concurrently multiplies the correction, dilutes the per-setup sample, and — the real cost — makes it impossible to tell whether a bad stretch was the setup or your attention split five ways.</p>
+</section>
+
+<section>
+  <h2><span class="num">08</span>Analysis</h2>
+  <p class="sub">The evaluation script implements the cost model, the block bootstrap, and the gates above.</p>
+  <pre><span class="c"># after each block of replay sessions</span>
+python mes_replay_eval.py trades.csv --min-expectancy 0.15 --alpha 0.01
+
+<span class="c"># reports per setup:</span>
+<span class="c">#   n, win rate, mean R, sd, net P&amp;L, avg risk in dollars</span>
+<span class="c">#   session-block bootstrap 95% CI on mean R, and P(mean <= 0)</span>
+<span class="c">#   gate verdict: KILL / CONTINUE, and trades still needed to confirm</span>
+<span class="c">#   breakdown by day type and by exit reason</span>
+<span class="c">#   portfolio view: daily P&amp;L distribution and max drawdown</span></pre>
+  <p>Run it on a fixed cadence — every 20 sessions, say — not whenever a stretch feels good or bad. Checking the numbers after a losing week and again after a winning one is an informal sequential test with no correction, and it will find whatever you are hoping for.</p>
+</section>
+
+<footer>
+  <p>This is a testing protocol, not trading advice. MES is leveraged; losses can exceed the intended risk on gaps, and the published research on retail day trading finds a low single-digit percentage of participants profitable net of costs over multi-year windows. The purpose of running this protocol is as much to find out whether any of these setups clear that bar as it is to trade them.</p>
+</footer>
+
+</div>
