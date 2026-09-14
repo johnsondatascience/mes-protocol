@@ -380,12 +380,26 @@ def _session_vwap(bars: pd.DataFrame) -> pd.Series:
     return (cum_pv / cum_v.replace(0, np.nan)).ffill()
 
 
+def running_crosses(close: pd.Series, vwap: pd.Series) -> np.ndarray:
+    """Closes through VWAP, counted through each bar.
+
+    A close exactly on VWAP (or before VWAP exists) takes no side, so it
+    neither counts as a cross nor resets the last side. One definition serves
+    both the 11:00 day-type count and S3's bar-by-bar stand-down, so the two
+    can never disagree about what a cross is.
+    """
+    side = np.sign((close - vwap).to_numpy(dtype=float))
+    held = pd.Series(np.where(side == 0, np.nan, side)).ffill().to_numpy()
+    flips = np.zeros(len(held), dtype=np.int64)
+    if len(held) > 1:
+        prev, cur = held[:-1], held[1:]
+        flips[1:] = (cur != prev) & ~np.isnan(cur) & ~np.isnan(prev)
+    return np.cumsum(flips)
+
+
 def _count_crosses(close: pd.Series, vwap: pd.Series) -> int:
-    side = np.sign(close - vwap)
-    side = side[side != 0]
-    if len(side) < 2:
-        return 0
-    return int((side.to_numpy()[1:] != side.to_numpy()[:-1]).sum())
+    counts = running_crosses(close, vwap)
+    return int(counts[-1]) if len(counts) else 0
 
 
 def _one_timeframing(bars30: pd.DataFrame) -> tuple[int, int]:

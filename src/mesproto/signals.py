@@ -43,10 +43,10 @@ from .config import (
     ET, MECHANICAL_TARGET_R, RTH_CLOSE, RTH_OPEN, S1_BREAK_WINDOW,
     S1_DELTA_CONFIRM_BARS, S1_RETEST_MAX_REENTRY_PTS, S1_STOP_CAP_PTS,
     S1_STOP_FLOOR_PTS, S3_ENTRY_CUTOFF, S3_MAX_COUNTER_DELTA_FRAC,
-    S3_MIN_OTF_BARS, S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS,
+    S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS, S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS,
     S3_VWAP_TOLERANCE_PTS, Contract,
 )
-from .levels import SessionLevels, rth_slice
+from .levels import SessionLevels, rth_slice, running_crosses
 
 Direction = Literal["LONG", "SHORT"]
 EntryStyle = Literal["LIMIT", "STOP"]
@@ -274,11 +274,40 @@ def _otf_confirm_time(rth: pd.DataFrame, cutoff: time) -> Optional[pd.Timestamp]
     return None
 
 
+def _delta_at_extreme_with_trend(delta: Optional[pd.Series], until: pd.Timestamp,
+                                 direction: Direction) -> Optional[bool]:
+    """Is cumulative delta at its session extreme in the trend's direction,
+    using bars that closed before `until`?
+
+    Direction matters: an up-trend with delta pinned at its session *low* is
+    price and flow diverging, the opposite of what the S3 day gate asks for.
+    None when there is no delta to check.
+    """
+    if delta is None:
+        return None
+    cum = delta.cumsum()
+    seen = cum[cum.index < until]
+    if len(seen) < 2:
+        return None
+    last = seen.iloc[-1]
+    return bool(last >= seen.max()) if direction == "LONG" else bool(last <= seen.min())
+
+
 def generate_s3(
     bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
     entry_style: EntryStyle = "LIMIT",
 ) -> list[Signal]:
     """Pullback to session VWAP on a confirmed trend day.
+
+    Day gate, all confirmed before any entry: opened outside prior value,
+    one-timeframing on 30-minute bars, and cumulative delta at a session
+    extreme with price. A gate condition known to fail returns []; one the
+    data cannot check (no delta) is recorded as None and flags every signal.
+
+    Stand-downs are enforced bar by bar: no entries after S3_ENTRY_CUTOFF, and
+    none once VWAP has been crossed more than S3_MAX_VWAP_CROSSES times — that
+    count keeps running after the 11:00 classification, because an afternoon
+    of chop is exactly the balance day in a trend costume the rule exists for.
 
     `entry_style` is pre-registered per the protocol: LIMIT at VWAP, or STOP
     beyond the pullback bar's extreme. Pick one and never mix within a sample.
@@ -297,6 +326,11 @@ def generate_s3(
     vwap = lv.vwap
     delta = _bar_delta(rth)
 
+    delta_at_extreme = _delta_at_extreme_with_trend(delta, confirm_at, direction)
+    if delta_at_extreme is False:
+        return out
+    crosses = running_crosses(rth["close"], vwap)
+
     tradeable = rth[(rth.index >= confirm_at)
                     & (rth.index.time < S3_ENTRY_CUTOFF)]
     if tradeable.empty:
@@ -311,6 +345,8 @@ def generate_s3(
 
     for ts, bar in tradeable.iterrows():
         i = idx_all.get_loc(ts)
+        if crosses[i] > S3_MAX_VWAP_CROSSES:
+            break                            # stand down for the rest of the session
         v = vwap.iloc[i]
         if np.isnan(v):
             continue
@@ -366,7 +402,10 @@ def generate_s3(
             setup="VWAP_CONT", session_date=lv.date, direction=direction,
             signal_time=ts, entry_px=entry, stop_px=stop, entry_style=entry_style,
             checklist={
-                "day_gate_confirmed": True,
+                "opened_outside_value": True,       # s3_gate
+                "one_timeframing": True,            # s3_gate, at confirm_at
+                "delta_at_extreme": delta_at_extreme,
+                "vwap_crosses_ok": True,            # enforced bar by bar above
                 "pullback_to_vwap": True,
                 "volume_declining": vol_declining,
                 "counter_delta_ok": counter_ok,
@@ -374,8 +413,9 @@ def generate_s3(
             },
             context={
                 "vwap": float(v), "day_type": lv.day_type,
+                "ib_range_pts": lv.ib_range,
                 "otf_bars": max(lv.otf_up_bars, lv.otf_down_bars),
-                "vwap_crosses": lv.vwap_crosses,
+                "vwap_crosses": int(crosses[i]),
                 "on_range_pos": lv.on_range_pos,
                 "confirmed_at": str(confirm_at.time()),
             },

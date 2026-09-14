@@ -76,13 +76,44 @@ def s3_volumes():
     return v
 
 
-def build_two_days(day2_path, day2_vol=None, day2_on=None, day1_center=5000.0):
+def s3_chop_path():
+    """Confirmed trend at 11:00, then two full swings through VWAP (4 crosses
+    by 12:45), then an otherwise-textbook low-volume pullback into VWAP."""
+    rise = np.linspace(5040, 5100, 90)                        # 09:30-11:00
+    swings = np.concatenate([np.linspace(5100, 5050, 30), np.linspace(5050, 5100, 30),
+                             np.linspace(5100, 5050, 30), np.linspace(5050, 5100, 30)])
+    pull = np.concatenate([np.linspace(5100, 5074, 20), np.full(5, 5074.0)])
+    cont = np.linspace(5074, 5130, 60)
+    path = np.concatenate([rise, swings, pull, cont])
+    return np.concatenate([path, np.full(390 - len(path), 5130.0)])
+
+
+def s3_chop_volumes():
+    v = np.full(390, 1500.0)
+    v[210:235] = 300.0
+    return v
+
+
+def running_vwap_crosses(close: pd.Series, vwap: pd.Series) -> np.ndarray:
+    """Crosses of close through VWAP counted through each bar (independent of
+    the production helper on purpose)."""
+    out, last, n = [], 0.0, 0
+    for s in np.sign((close - vwap).to_numpy()):
+        if s != 0:
+            n += int(last != 0 and s != last)
+            last = s
+        out.append(n)
+    return np.array(out)
+
+
+def build_two_days(day2_path, day2_vol=None, day2_on=None, day1_center=5000.0,
+                   day2_delta_bias=0.2):
     d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
     b = pd.concat([
         prior_balance_day(d0, day1_center),
         bars_from_path(d1, day2_path, volumes=day2_vol,
                        overnight_center=day2_on if day2_on else day2_path[0],
-                       delta_bias=0.2),
+                       delta_bias=day2_delta_bias),
     ]).sort_index()
     bars = load_dataframe_bars(b.tz_localize(None).tz_localize(ET)
                                if b.index.tz is None else b, source="FUTURES")
@@ -329,6 +360,71 @@ def test_s1_one_signal_per_break():
                               build_sessions(bars, tick=TICK)}[S1_LOOKAHEAD_DATE], MES)
     assert len(sigs) == 1, [s.signal_time.time() for s in sigs]
     print(f"  one break, one signal at {sigs[0].signal_time.time()}")
+
+
+def test_s3_checklist_maps_every_protocol_condition():
+    """Day gate (3 conditions + VWAP-chop stand-down) and trigger, each named."""
+    bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
+    sigs = generate_s3(bars, lv[d1], MES)
+    assert sigs
+    expected = {"opened_outside_value", "one_timeframing", "delta_at_extreme",
+                "vwap_crosses_ok", "pullback_to_vwap", "volume_declining",
+                "counter_delta_ok", "stop_within_cap"}
+    assert set(sigs[0].checklist) == expected, sorted(sigs[0].checklist)
+    assert sigs[0].checklist_ok is True
+    print(f"  checklist keys: {sorted(sigs[0].checklist)}")
+
+
+def test_s3_delta_diverging_from_trend_fails_day_gate():
+    """Up-trend with cumulative delta at its session LOW is not 'delta at a
+    session extreme with price'."""
+    bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0,
+                                  day2_delta_bias=-0.2)
+    assert lv[d1].s3_gate() is True, "fixture must pass the bar-level gate"
+    assert generate_s3(bars, lv[d1], MES) == []
+    print("  diverging delta -> no S3 signals")
+
+
+def test_s3_delta_extreme_unverifiable_without_delta():
+    bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
+    stripped = bars.copy()
+    stripped[["buy_volume", "sell_volume"]] = np.nan
+    stripped.attrs.update(bars.attrs)
+    stripped.attrs["has_delta"] = False
+    sess = {s.date: s for s in build_sessions(stripped, tick=TICK)}
+    sigs = generate_s3(stripped, sess[d1], MES)
+    assert sigs, "bar-only data should still generate, flagged"
+    assert sigs[0].checklist["delta_at_extreme"] is None
+    assert sigs[0].checklist_ok is False
+    print("  no delta -> delta_at_extreme None, checklist_ok False")
+
+
+def test_s3_stands_down_once_vwap_crossed_too_often():
+    """'Any day where VWAP has been crossed more than 3 times' is knowable bar
+    by bar. Counting only through 11:00 lets an afternoon of chop through."""
+    from mesproto.config import S3_MAX_VWAP_CROSSES
+    from mesproto.levels import rth_slice
+    bars, lv, d1 = build_two_days(s3_chop_path(), day2_vol=s3_chop_volumes(),
+                                  day2_on=5040.0)
+    s = lv[d1]
+    assert s.s3_gate() is True and s.vwap_crosses <= S3_MAX_VWAP_CROSSES
+    rth = rth_slice(bars, d1)
+    crosses = running_vwap_crosses(rth["close"], s.vwap)
+    assert crosses[-1] > S3_MAX_VWAP_CROSSES, "fixture must chop through VWAP"
+    for sig in generate_s3(bars, s, MES):
+        n = crosses[rth.index.get_loc(sig.signal_time)]
+        assert n <= S3_MAX_VWAP_CROSSES, (sig.signal_time.time(), n)
+    print(f"  {crosses[-1]} crosses by the close; no entry after the "
+          f"{S3_MAX_VWAP_CROSSES + 1}th")
+
+
+def test_s3_log_carries_ib_range_covariate():
+    bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
+    fills = [simulate(s, bars, MES) for s in generate_s3(bars, lv[d1], MES)]
+    log = fills_to_log(fills, MES)
+    assert not log.empty
+    assert log["ib_range_pts"].notna().all(), log["ib_range_pts"].tolist()
+    print(f"  S3 rows carry ib_range_pts={log['ib_range_pts'].iloc[0]:.2f}")
 
 
 def test_s3_signals_survive_truncation():
