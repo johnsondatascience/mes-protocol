@@ -160,6 +160,21 @@ def test_no_lookahead():
           f"{before.rth_high:.2f} -> {after.rth_high:.2f}")
 
 
+def test_zero_width_overnight_range_has_no_position():
+    """A range with no width has no 'where in the range'. 0.5 is a plausible
+    substitute, which invariant 2 forbids."""
+    d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
+    today = make_session(d1, trend_path(5060.0), on_center=5060.0)
+    on = today.index < pd.Timestamp.combine(d1, time(9, 30)).tz_localize(ET)
+    today.loc[on, ["open", "high", "low", "close"]] = 5060.0
+    s = {x.date: x for x in build_sessions(
+        build([make_session(d0, balance_path(5000.0)), today]), tick=TICK)}[d1]
+    assert s.on_high == s.on_low == 5060.0
+    assert s.on_range_pos is None, s.on_range_pos
+    assert s.s5_gate() is False
+    print("  flat overnight -> on_range_pos None")
+
+
 def test_prior_close_and_gap():
     d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
     prior = make_session(d0, balance_path(5000.0))

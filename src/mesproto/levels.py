@@ -43,9 +43,10 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 
 from .config import (
-    DAY_TYPE_CUTOFF, ET, IB_END, ON_OPEN, RTH_CLOSE, RTH_OPEN,
-    S1_IB_RANGE_MAX_PCT, S1_IB_RANGE_MIN_PCT, S3_MAX_VWAP_CROSSES,
-    S3_MIN_OTF_BARS,
+    DAY_TYPE_CUTOFF, DOUBLE_DIST_RANGE_MULT, ET, IB_END, ON_OPEN,
+    OTF_BAR_MINUTES, RTH_CLOSE, RTH_OPEN, S1_IB_RANGE_MAX_PCT,
+    S1_IB_RANGE_MIN_PCT, S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS,
+    S5_ON_EXTREME_PCT, VALUE_AREA_PCT,
 )
 
 SourceKind = Literal["SPY", "FUTURES"]
@@ -299,7 +300,8 @@ class Profile:
         return self.vah - self.val
 
 
-def volume_profile(bars: pd.DataFrame, tick: float, value_area: float = 0.70) -> Optional[Profile]:
+def volume_profile(bars: pd.DataFrame, tick: float,
+                   value_area: float = VALUE_AREA_PCT) -> Optional[Profile]:
     """Volume profile from OHLCV bars, distributing each bar's volume evenly
     across the price levels it spanned.
 
@@ -337,7 +339,8 @@ def volume_profile(bars: pd.DataFrame, tick: float, value_area: float = 0.70) ->
 
 
 def volume_profile_from_trades(
-    price: np.ndarray, size: np.ndarray, tick: float, value_area: float = 0.70
+    price: np.ndarray, size: np.ndarray, tick: float,
+    value_area: float = VALUE_AREA_PCT,
 ) -> Optional[Profile]:
     """Exact volume profile from trades at price (use with TBBO)."""
     if len(price) == 0:
@@ -487,10 +490,11 @@ class SessionLevels:
                 and self.vwap_crosses <= S3_MAX_VWAP_CROSSES)
 
     def s5_gate(self, on_volume_median: Optional[float] = None) -> bool:
-        """S5: 09:30 in the top/bottom 15% of a well-traded overnight range."""
+        """S5: 09:30 in the top/bottom S5_ON_EXTREME_PCT of a well-traded overnight range."""
         if self.on_range_pos is None:
             return False
-        extreme = self.on_range_pos >= 0.85 or self.on_range_pos <= 0.15
+        extreme = (self.on_range_pos >= 1.0 - S5_ON_EXTREME_PCT
+                   or self.on_range_pos <= S5_ON_EXTREME_PCT)
         if on_volume_median is None or self.on_volume is None:
             return extreme
         return extreme and self.on_volume > on_volume_median
@@ -565,7 +569,7 @@ def _classify(
     rng = pre["high"].max() - pre["low"].min()
     ib_rng = pre.between_time(RTH_OPEN, IB_END, inclusive="left")
     ib = (ib_rng["high"].max() - ib_rng["low"].min()) if not ib_rng.empty else np.nan
-    if (not np.isnan(ib) and ib > 0 and rng > 2.0 * ib
+    if (not np.isnan(ib) and ib > 0 and rng > DOUBLE_DIST_RANGE_MULT * ib
             and vwap_crosses > S3_MAX_VWAP_CROSSES):
         return "DOUBLE_DIST"
     return "BALANCE"
@@ -575,7 +579,7 @@ def build_sessions(
     bars: pd.DataFrame,
     tick: float,
     cutoff: time = DAY_TYPE_CUTOFF,
-    value_area: float = 0.70,
+    value_area: float = VALUE_AREA_PCT,
     dates: Optional[Iterable[date]] = None,
 ) -> list[SessionLevels]:
     """Build a SessionLevels record per RTH session.
@@ -617,7 +621,7 @@ def build_sessions(
 
         agg = {"open": "first", "high": "max", "low": "min",
                "close": "last", "volume": "sum"}
-        pre30 = pre.resample("30min").agg(agg).dropna(subset=["open"])
+        pre30 = pre.resample(f"{OTF_BAR_MINUTES}min").agg(agg).dropna(subset=["open"])
         otf_up, otf_down = _one_timeframing(pre30)
 
         opened_inside = None
@@ -631,8 +635,9 @@ def build_sessions(
             on_high, on_low = float(on["high"].max()), float(on["low"].min())
             on_mid = (on_high + on_low) / 2.0
             span = on_high - on_low
-            on_pos = float((open_px - on_low) / span) if span > 0 else 0.5
-            on_pos = min(max(on_pos, 0.0), 1.0)
+            # a range with no width has no position in it — None, not 0.5
+            on_pos = min(max(float((open_px - on_low) / span), 0.0), 1.0) \
+                if span > 0 else None
             on_vol = float(on["volume"].sum())
 
         if bars.attrs.get("has_delta", False):

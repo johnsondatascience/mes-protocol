@@ -22,6 +22,15 @@ RTH_CLOSE = time(16, 0)
 IB_END = time(10, 0)
 ON_OPEN = time(18, 0)            # CME equity index reopen, prior calendar day
 DAY_TYPE_CUTOFF = time(11, 0)    # classify here. NEVER at the close.
+OTF_BAR_MINUTES = 30             # one-timeframing is read on 30-minute bars
+
+# --- levels -------------------------------------------------------------------
+VALUE_AREA_PCT = 0.70            # share of session volume inside VAL..VAH
+DOUBLE_DIST_RANGE_MULT = 2.0     # pre-cutoff range beyond this x IB (with chop) = DOUBLE_DIST
+S5_ON_EXTREME_PCT = 0.15         # 09:30 in the top/bottom 15% of the overnight range
+
+# --- fill simulation ----------------------------------------------------------
+ENTRY_MAX_WAIT_BARS = 30         # a resting entry unfilled after this many bars is cancelled
 
 # --- setup-specific windows ---------------------------------------------------
 S1_BREAK_WINDOW = (time(10, 0), time(11, 30))
@@ -90,6 +99,7 @@ S1_IB_RANGE_MIN_PCT = 0.0025
 S1_IB_RANGE_MAX_PCT = 0.0075
 S1_DELTA_CONFIRM_BARS = 3
 S1_RETEST_MAX_REENTRY_PTS = 2.0
+S1_STOP_BEYOND_SWING_PTS = 1.0
 S1_STOP_FLOOR_PTS = 4.0
 S1_STOP_CAP_PTS = 8.0
 S1_MAX_GAP_PCT = 0.01     # gap opens beyond this vs prior close: logged separately

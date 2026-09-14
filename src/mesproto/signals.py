@@ -40,9 +40,10 @@ import numpy as np
 import pandas as pd
 
 from .config import (
-    ET, MECHANICAL_TARGET_R, RTH_CLOSE, RTH_OPEN, S1_BREAK_WINDOW,
-    S1_DELTA_CONFIRM_BARS, S1_MAX_GAP_PCT, S1_NEWS_STAND_DOWN_UNTIL,
-    S1_RETEST_MAX_REENTRY_PTS, S1_STOP_CAP_PTS,
+    ENTRY_MAX_WAIT_BARS, ET, MECHANICAL_TARGET_R, OTF_BAR_MINUTES, RTH_CLOSE,
+    RTH_OPEN, S1_BREAK_WINDOW, S1_DELTA_CONFIRM_BARS, S1_MAX_GAP_PCT,
+    S1_NEWS_STAND_DOWN_UNTIL,
+    S1_RETEST_MAX_REENTRY_PTS, S1_STOP_BEYOND_SWING_PTS, S1_STOP_CAP_PTS,
     S1_STOP_FLOOR_PTS, S3_ENTRY_CUTOFF, S3_MAX_COUNTER_DELTA_FRAC,
     S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS, S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS,
     S3_VWAP_TOLERANCE_PTS, Contract,
@@ -235,7 +236,7 @@ def generate_s1(
                 continue
 
         entry = edge + sign * contract.tick
-        raw_stop = retest_extreme - sign * 1.0   # 1 pt beyond the retest swing
+        raw_stop = retest_extreme - sign * S1_STOP_BEYOND_SWING_PTS
         # the swing must be on the correct side of entry to be a stop at all
         if sign * (entry - raw_stop) <= 0:
             raw_stop = entry - sign * S1_STOP_FLOOR_PTS
@@ -280,7 +281,7 @@ def _otf_confirm_time(rth: pd.DataFrame, cutoff: time) -> Optional[pd.Timestamp]
     agg = {"open": "first", "high": "max", "low": "min",
            "close": "last", "volume": "sum"}
     pre = rth.between_time(RTH_OPEN, cutoff, inclusive="left")
-    b30 = pre.resample("30min").agg(agg).dropna(subset=["open"])
+    b30 = pre.resample(f"{OTF_BAR_MINUTES}min").agg(agg).dropna(subset=["open"])
     if len(b30) < S3_MIN_OTF_BARS + 1:
         return None
     hh, hl = b30["high"].diff() > 0, b30["low"].diff() > 0
@@ -292,7 +293,7 @@ def _otf_confirm_time(rth: pd.DataFrame, cutoff: time) -> Optional[pd.Timestamp]
         run_d = run_d + 1 if dn[k] else 0
         if max(run_u, run_d) >= S3_MIN_OTF_BARS:
             # confirmable only once that 30-min bar has closed
-            return b30.index[k] + pd.Timedelta(minutes=30)
+            return b30.index[k] + pd.Timedelta(minutes=OTF_BAR_MINUTES)
     return None
 
 
@@ -452,7 +453,7 @@ def generate_s3(
 # ---------------------------------------------------------------------------
 
 def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
-             max_wait_bars: int = 30) -> Fill:
+             max_wait_bars: int = ENTRY_MAX_WAIT_BARS) -> Fill:
     """Walk forward from the signal bar and resolve entry then exit.
 
     See FILL CONVENTIONS in the module docstring. They are intentionally
