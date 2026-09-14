@@ -11,7 +11,7 @@ Pipeline:
 from .config import CONTRACTS, ES, MES, SPY, Contract
 from .levels import (
     Profile, SessionLevels, build_sessions, load_csv_bars,
-    load_databento_tbbo, load_dataframe_bars, sessions_to_frame,
+    load_databento_tbbo, load_dataframe_bars, load_news_dates, sessions_to_frame,
     volume_profile, volume_profile_from_trades,
 )
 from .schema import fills_to_log, validate, write_template
@@ -22,7 +22,7 @@ __version__ = "0.1.0"
 __all__ = [
     "CONTRACTS", "ES", "MES", "SPY", "Contract",
     "Profile", "SessionLevels", "build_sessions", "load_csv_bars",
-    "load_databento_tbbo", "load_dataframe_bars", "sessions_to_frame",
+    "load_databento_tbbo", "load_dataframe_bars", "load_news_dates", "sessions_to_frame",
     "volume_profile", "volume_profile_from_trades",
     "Fill", "Signal", "generate_s1", "generate_s3", "run_all", "simulate",
     "fills_to_log", "validate", "write_template",

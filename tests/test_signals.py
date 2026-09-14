@@ -362,6 +362,43 @@ def test_s1_one_signal_per_break():
     print(f"  one break, one signal at {sigs[0].signal_time.time()}")
 
 
+def test_s1_gap_open_beyond_limit_is_logged_separately():
+    """'Gap opens beyond 1% of prior close — log separately, different regime.'"""
+    bars, lv, d1 = build_two_days(s1_path(), day1_center=4900.0)   # ~2% gap
+    assert abs(lv[d1].open_px / lv[d1].prior_close - 1) > 0.01
+    sigs = generate_s1(bars, lv[d1], MES)
+    assert sigs, "gapped sessions still log, flagged"
+    assert sigs[0].checklist["gap_within_limit"] is False
+    assert sigs[0].checklist_ok is False
+
+    bars, lv, d1 = build_two_days(s1_path())                        # no gap
+    sigs = generate_s1(bars, lv[d1], MES)
+    assert sigs[0].checklist["gap_within_limit"] is True
+    print("  2% gap -> gap_within_limit False; flat open -> True")
+
+
+def test_s1_news_day_stands_down_before_1030():
+    bars = s1_quick_retest_bars(break_delta=500.0,
+                                retest_deltas=[-50.0, -50.0, -50.0, -50.0, -50.0])
+    d = S1_LOOKAHEAD_DATE
+    lv = {x.date: x for x in build_sessions(bars, tick=TICK)}[d]
+
+    on_news = generate_s1(bars, lv, MES, news_dates={d})
+    assert all(s.signal_time.time() >= time(10, 30) for s in on_news), \
+        [s.signal_time.time() for s in on_news]
+
+    quiet = generate_s1(bars, lv, MES, news_dates={date(2026, 3, 6)})
+    assert quiet and quiet[0].checklist["no_news_stand_down"] is True
+
+    unknown = generate_s1(bars, lv, MES)
+    assert unknown[0].signal_time.time() < time(10, 30)
+    assert unknown[0].checklist["no_news_stand_down"] is None, \
+        "no calendar supplied: the stand-down could not be verified"
+    assert unknown[0].checklist_ok is False
+    print(f"  news day: {len(on_news)} signals before 10:30 suppressed; "
+          f"no calendar -> None")
+
+
 def test_s3_checklist_maps_every_protocol_condition():
     """Day gate (3 conditions + VWAP-chop stand-down) and trigger, each named."""
     bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)

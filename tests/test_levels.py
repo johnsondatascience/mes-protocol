@@ -160,6 +160,70 @@ def test_no_lookahead():
           f"{before.rth_high:.2f} -> {after.rth_high:.2f}")
 
 
+def test_prior_close_and_gap():
+    d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
+    prior = make_session(d0, balance_path(5000.0))
+    today = make_session(d1, trend_path(5060.0), on_center=5060.0)
+    sessions = {s.date: s for s in build_sessions(build([prior, today]), tick=TICK)}
+    assert sessions[d0].prior_close is None, "first session has no prior close"
+    assert sessions[d0].gap_pct is None
+    assert sessions[d1].prior_close == sessions[d0].rth_close
+    expected = (sessions[d1].open_px - sessions[d0].rth_close) / sessions[d0].rth_close
+    assert abs(sessions[d1].gap_pct - expected) < 1e-12
+    print(f"  prior_close={sessions[d1].prior_close:.2f} gap={sessions[d1].gap_pct:+.3%}")
+
+
+def test_csv_loader_offsets_across_dst():
+    """ET exports with UTC offsets change offset at DST. Both offset-carrying
+    and naive (exchange-local) timestamps must land on the same ET clock."""
+    import os
+    import tempfile
+    from mesproto.levels import load_csv_bars
+
+    rows = "open,high,low,close,volume\n"
+    with_offsets = ("timestamp," + rows
+                    + "2026-03-06 09:30:00-05:00,1,2,0.5,1.5,10\n"
+                    + "2026-03-09 09:30:00-04:00,1,2,0.5,1.5,10\n")
+    naive = ("timestamp," + rows
+             + "2026-03-06 09:30:00,1,2,0.5,1.5,10\n"
+             + "2026-03-09 09:30:00,1,2,0.5,1.5,10\n")
+    for body in (with_offsets, naive):
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            bars = load_csv_bars(path, source="FUTURES")
+        finally:
+            os.remove(path)
+        assert [ts.time() for ts in bars.index] == [time(9, 30), time(9, 30)], bars.index
+        assert str(bars.index.tz) == "America/New_York"
+    print("  offset-carrying and naive timestamps both land on 09:30 ET across DST")
+
+
+def test_load_news_dates():
+    import os
+    import tempfile
+    from mesproto.levels import load_news_dates
+
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("date,release\n2026-03-06,NFP\n\n# CPI\n2026-03-11 ,CPI\n")
+        assert load_news_dates(path) == {date(2026, 3, 6), date(2026, 3, 11)}
+
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("2026-03-06\nMarch 11\n")
+        try:
+            load_news_dates(path)
+        except ValueError as e:
+            assert ":2:" in str(e), e
+        else:
+            raise AssertionError("a malformed date must not be silently skipped")
+    finally:
+        os.remove(path)
+    print("  header/comments/blank skipped; malformed row raises")
+
+
 def test_spy_has_no_overnight():
     d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
     prior = make_session(d0, balance_path(500.0), overnight=False)

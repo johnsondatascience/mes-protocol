@@ -93,12 +93,38 @@ def load_csv_bars(
     default assumes exchange-local, which is what most free feeds ship.
     """
     df = pd.read_csv(path)
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    df = df.set_index(timestamp_col)
-    if df.index.tz is None:
-        df = df.tz_localize(ZoneInfo(tz), nonexistent="shift_forward",
-                            ambiguous="infer")
+    raw = df[timestamp_col].astype(str)
+    if pd.to_datetime(raw.iloc[:1]).dt.tz is not None:
+        # offsets in the strings are authoritative, and they change at DST —
+        # parse through UTC or pandas falls back to an object index
+        idx = pd.DatetimeIndex(pd.to_datetime(raw, utc=True))
+    else:
+        idx = pd.DatetimeIndex(pd.to_datetime(raw)).tz_localize(
+            ZoneInfo(tz), nonexistent="shift_forward", ambiguous="infer")
+    df = df.drop(columns=[timestamp_col]).set_index(idx)
     return _finalize(df, source)
+
+
+def load_news_dates(path: str) -> set[date]:
+    """Scheduled-release dates (FOMC, CPI, NFP) from a text or CSV file.
+
+    One YYYY-MM-DD per line, taken from the first comma-separated field;
+    blank lines, '#' comments and a non-date header are skipped. Which
+    releases count is the protocol's call — this only reads the list.
+    """
+    out: set[date] = set()
+    with open(path, encoding="utf-8") as fh:
+        for n, raw in enumerate(fh):
+            field = raw.split("#", 1)[0].split(",", 1)[0].strip()
+            if not field:
+                continue
+            try:
+                out.add(date.fromisoformat(field))
+            except ValueError:
+                if n == 0:
+                    continue          # header row
+                raise ValueError(f"{path}:{n + 1}: not a YYYY-MM-DD date: {field!r}")
+    return out
 
 
 def load_dataframe_bars(df: pd.DataFrame, source: SourceKind = "SPY") -> pd.DataFrame:
@@ -324,6 +350,7 @@ class SessionLevels:
     prior_vah: Optional[float]
     prior_val: Optional[float]
     prior_vpoc: Optional[float]
+    prior_close: Optional[float]   # prior RTH session's last close
     opened_inside_value: Optional[bool]
 
     # overnight (futures only)
@@ -342,6 +369,13 @@ class SessionLevels:
     # order flow (TBBO only)
     cum_delta: Optional[pd.Series]
     delta_at_extreme: Optional[bool]
+
+    @property
+    def gap_pct(self) -> Optional[float]:
+        """Signed open-vs-prior-close gap as a fraction. None without a prior session."""
+        if self.prior_close is None or self.prior_close <= 0:
+            return None
+        return (self.open_px - self.prior_close) / self.prior_close
 
     def s1_gate(self, index_level: Optional[float] = None) -> bool:
         """S1: IB range between 0.25% and 0.75% of index level."""
@@ -466,6 +500,7 @@ def build_sessions(
     wanted = sorted(set(dates)) if dates is not None else all_dates
 
     prior_profiles: dict[date, Optional[Profile]] = {}
+    prior_closes: dict[date, float] = {}
     out: list[SessionLevels] = []
 
     for i, d in enumerate(all_dates):
@@ -473,11 +508,13 @@ def build_sessions(
         if rth.empty:
             continue
         prior_profiles[d] = volume_profile(rth, tick=tick, value_area=value_area)
+        prior_closes[d] = float(rth["close"].iloc[-1])
         if d not in wanted:
             continue
 
         prior_d = all_dates[i - 1] if i > 0 else None
         pp = prior_profiles.get(prior_d) if prior_d else None
+        prior_close = prior_closes.get(prior_d) if prior_d else None
 
         ib = rth.between_time(RTH_OPEN, IB_END, inclusive="left")
         if ib.empty:
@@ -528,6 +565,7 @@ def build_sessions(
             prior_vah=pp.vah if pp else None,
             prior_val=pp.val if pp else None,
             prior_vpoc=pp.poc if pp else None,
+            prior_close=prior_close,
             opened_inside_value=opened_inside,
             on_high=on_high, on_low=on_low, on_mid=on_mid,
             on_range_pos=on_pos, on_volume=on_vol,
@@ -557,7 +595,8 @@ def sessions_to_frame(sessions: Sequence[SessionLevels]) -> pd.DataFrame:
             "rth_high": s.rth_high, "rth_low": s.rth_low, "rth_close": s.rth_close,
             "vwap_crosses": s.vwap_crosses,
             "prior_vah": s.prior_vah, "prior_val": s.prior_val,
-            "prior_vpoc": s.prior_vpoc, "opened_inside_value": s.opened_inside_value,
+            "prior_vpoc": s.prior_vpoc, "prior_close": s.prior_close,
+            "gap_pct": s.gap_pct, "opened_inside_value": s.opened_inside_value,
             "on_high": s.on_high, "on_low": s.on_low, "on_mid": s.on_mid,
             "on_range_pos": s.on_range_pos, "on_volume": s.on_volume,
             "otf_up_bars": s.otf_up_bars, "otf_down_bars": s.otf_down_bars,

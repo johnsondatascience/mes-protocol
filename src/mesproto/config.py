@@ -25,6 +25,7 @@ DAY_TYPE_CUTOFF = time(11, 0)    # classify here. NEVER at the close.
 
 # --- setup-specific windows ---------------------------------------------------
 S1_BREAK_WINDOW = (time(10, 0), time(11, 30))
+S1_NEWS_STAND_DOWN_UNTIL = time(10, 30)   # FOMC / CPI / NFP days
 S3_ENTRY_CUTOFF = time(15, 0)
 S4_NO_TRADE_OPEN = time(9, 35)   # first 5 minutes
 S4_NO_TRADE_CLOSE = time(15, 45)  # last 15 minutes
@@ -83,6 +84,7 @@ S1_DELTA_CONFIRM_BARS = 3
 S1_RETEST_MAX_REENTRY_PTS = 2.0
 S1_STOP_FLOOR_PTS = 4.0
 S1_STOP_CAP_PTS = 8.0
+S1_MAX_GAP_PCT = 0.01     # gap opens beyond this vs prior close: logged separately
 
 S3_MIN_OTF_BARS = 2
 S3_MAX_VWAP_CROSSES = 3

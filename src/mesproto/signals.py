@@ -34,14 +34,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from typing import Literal, Optional, Sequence
+from typing import Collection, Literal, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 
 from .config import (
     ET, MECHANICAL_TARGET_R, RTH_CLOSE, RTH_OPEN, S1_BREAK_WINDOW,
-    S1_DELTA_CONFIRM_BARS, S1_RETEST_MAX_REENTRY_PTS, S1_STOP_CAP_PTS,
+    S1_DELTA_CONFIRM_BARS, S1_MAX_GAP_PCT, S1_NEWS_STAND_DOWN_UNTIL,
+    S1_RETEST_MAX_REENTRY_PTS, S1_STOP_CAP_PTS,
     S1_STOP_FLOOR_PTS, S3_ENTRY_CUTOFF, S3_MAX_COUNTER_DELTA_FRAC,
     S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS, S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS,
     S3_VWAP_TOLERANCE_PTS, Contract,
@@ -136,6 +137,7 @@ def _clamp_stop(entry: float, raw_stop: float, sign: int,
 
 def generate_s1(
     bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
+    news_dates: Optional[Collection[date]] = None,
 ) -> list[Signal]:
     """Break of the IB between 10:00 and 11:30, entered on the retest.
 
@@ -147,6 +149,13 @@ def generate_s1(
     a failed retest, or a stand-down is still the same break; re-arming on
     every close beyond the edge would log one idea as several correlated
     trades and overweight whichever sessions hovered there.
+
+    Stand-downs. On FOMC / CPI / NFP days nothing is emitted before
+    S1_NEWS_STAND_DOWN_UNTIL; `news_dates` is that calendar. Without one the
+    stand-down cannot be verified, so earlier signals carry
+    no_news_stand_down=None. A gap open beyond S1_MAX_GAP_PCT of the prior
+    close is a different regime: still logged, but gap_within_limit=False
+    keeps it out of the primary sample (None when there is no prior close).
     """
     out: list[Signal] = []
     if not lv.s1_gate():
@@ -161,6 +170,9 @@ def generate_s1(
 
     delta = _bar_delta(rth)
     cum = delta.cumsum() if delta is not None else None
+    gap = lv.gap_pct
+    gap_ok = None if gap is None else bool(abs(gap) <= S1_MAX_GAP_PCT)
+    news_day = None if news_dates is None else lv.date in news_dates
 
     state = "WAITING"
     direction: Optional[Direction] = None
@@ -198,6 +210,13 @@ def generate_s1(
         if not touched or i == break_i:
             continue
 
+        if ts.time() < S1_NEWS_STAND_DOWN_UNTIL:
+            if news_day:
+                continue                      # stand down; the break stays armed
+            news_ok: Optional[bool] = None if news_day is None else True
+        else:
+            news_ok = True
+
         # delta confirmation: cumulative delta made a new session extreme in the
         # break direction on the break bar or within N bars after it. Only bars
         # through the current one are visible. While that window is still open
@@ -234,11 +253,14 @@ def generate_s1(
                 "delta_confirmed": delta_ok,
                 "retest_held": True,
                 "stop_within_cap": True,
+                "gap_within_limit": gap_ok,
+                "no_news_stand_down": news_ok,
             },
             context={
                 "ib_high": lv.ib_high, "ib_low": lv.ib_low,
                 "ib_range_pts": lv.ib_range, "day_type": lv.day_type,
                 "on_range_pos": lv.on_range_pos,   # S5 as a covariate
+                "gap_pct": gap,
                 "break_time": str(win.index[break_i].time()),
             },
         ))
@@ -502,16 +524,18 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
 
 
 def run_session(bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
-                s3_entry_style: EntryStyle = "LIMIT") -> list[Fill]:
-    signals = generate_s1(bars, lv, contract) + \
+                s3_entry_style: EntryStyle = "LIMIT",
+                news_dates: Optional[Collection[date]] = None) -> list[Fill]:
+    signals = generate_s1(bars, lv, contract, news_dates=news_dates) + \
         generate_s3(bars, lv, contract, entry_style=s3_entry_style)
     signals.sort(key=lambda s: s.signal_time)
     return [simulate(s, bars, contract) for s in signals]
 
 
 def run_all(bars: pd.DataFrame, sessions: Sequence[SessionLevels],
-            contract: Contract, s3_entry_style: EntryStyle = "LIMIT") -> list[Fill]:
+            contract: Contract, s3_entry_style: EntryStyle = "LIMIT",
+            news_dates: Optional[Collection[date]] = None) -> list[Fill]:
     fills: list[Fill] = []
     for lv in sessions:
-        fills.extend(run_session(bars, lv, contract, s3_entry_style))
+        fills.extend(run_session(bars, lv, contract, s3_entry_style, news_dates))
     return fills
