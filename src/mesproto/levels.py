@@ -31,6 +31,7 @@ still not compare levels across a roll boundary.
 
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass, field
 from datetime import date, time, timedelta
@@ -132,6 +133,110 @@ def load_dataframe_bars(df: pd.DataFrame, source: SourceKind = "SPY") -> pd.Data
     return _finalize(df.copy(), source)
 
 
+_CONTINUOUS_SYMBOL = re.compile(r"^[A-Z0-9]+\.[cnv]\.\d+$")
+_PARENT_SYMBOL = re.compile(r"^[A-Z0-9]+\.(FUT|OPT)$")
+
+
+def databento_symbology(symbols: str | Sequence[str]) -> tuple[str, str]:
+    """Validate a Databento request against invariant 6: one contract month.
+
+    Returns (symbol, stype_in). Refuses anything that would interleave
+    several instruments into one tape — multiple symbols, parent symbology
+    (every expiry *and* every spread at once), calendar spreads (prices are
+    spread values, not index levels). Continuous symbols (ES.c.0) are
+    unadjusted, so levels are fine *within* one expiry but every level
+    compared across the roll is wrong; that is allowed, loudly.
+    """
+    items = [symbols] if isinstance(symbols, str) else list(symbols)
+    items = [p.strip() for s in items for p in str(s).split(",") if p.strip()]
+    if len(items) != 1:
+        raise ValueError(
+            f"one contract month per request, got {items}. Bars are resampled "
+            "from every trade in the response, so several instruments would be "
+            "interleaved into one corrupt tape.")
+    sym = items[0]
+    if _PARENT_SYMBOL.match(sym):
+        raise ValueError(
+            f"{sym} is parent symbology: every expiry and spread in one stream. "
+            "Request a single expiry such as ESZ5.")
+    if "-" in sym or ":" in sym:
+        raise ValueError(f"{sym} looks like a spread; its prices are not index levels.")
+    if _CONTINUOUS_SYMBOL.match(sym):
+        warnings.warn(
+            f"!!! {sym} is a CONTINUOUS symbol. The series switches contract at "
+            "each roll; any value area, overnight range or IB compared across "
+            "that boundary is corrupt. Prefer a single expiry, and never pool "
+            "levels across a roll. !!!",
+            stacklevel=2,
+        )
+        return sym, "continuous"
+    return sym, "raw_symbol"
+
+
+def tbbo_to_bars(
+    trades: pd.DataFrame, bar_minutes: int = 1, sell_aggressor_code: str = "A",
+) -> pd.DataFrame:
+    """Aggregate a Databento TBBO/trades frame (as from `DBNStore.to_df()`)
+    into signed OHLCV bars.
+
+    Separate from the download so a file you already paid for can be
+    converted without re-requesting it, and so the conventions below are
+    testable offline:
+
+    * Bars are timed by `ts_event` (matching engine) when present. `to_df()`
+      indexes by `ts_recv`, which lags and can push a trade into the next bar.
+    * Only trades whose side is the buy or sell aggressor code count toward
+      delta. Side 'N' (no aggressor: auctions, some opening prints) is
+      counted in volume but in neither buy nor sell — treating it as a buy
+      biases every cumulative-delta condition upward.
+    * More than one instrument_id means the tape spans a roll (continuous
+      symbology) and is warned about.
+    """
+    if sell_aggressor_code not in ("A", "B"):
+        raise ValueError(f"sell_aggressor_code must be 'A' or 'B', got {sell_aggressor_code!r}")
+    buy_code = "B" if sell_aggressor_code == "A" else "A"
+    if trades.empty:
+        raise ValueError("no trades to aggregate")
+
+    ts_src = trades["ts_event"] if "ts_event" in trades.columns else trades.index
+    ts = pd.DatetimeIndex(pd.to_datetime(ts_src, utc=True))
+
+    if "instrument_id" in trades.columns and trades["instrument_id"].nunique() > 1:
+        firsts = pd.Series(ts, index=trades["instrument_id"].to_numpy()) \
+            .groupby(level=0).min().sort_values()
+        warnings.warn(
+            f"!!! tape contains {len(firsts)} instruments — a roll inside the "
+            f"requested range (first prints: {', '.join(map(str, firsts))}). "
+            "Levels computed across the roll are corrupt. !!!",
+            stacklevel=2,
+        )
+
+    px = trades["price"].astype(float)
+    if px.median() > 1e6:  # fixed-point 1e-9 (to_df(price_type="fixed"))
+        px = px / 1e9
+
+    size = trades["size"].astype(float).to_numpy()
+    side = trades["side"].astype(str).to_numpy()
+    t = pd.DataFrame({
+        "price": px.to_numpy(),
+        "size": size,
+        "buy_volume": np.where(side == buy_code, size, 0.0),
+        "sell_volume": np.where(side == sell_aggressor_code, size, 0.0),
+    }, index=ts).tz_convert(ET).sort_index()
+
+    rule = f"{bar_minutes}min"
+    bars = t["price"].resample(rule).ohlc()
+    bars["volume"] = t["size"].resample(rule).sum()
+    bars["buy_volume"] = t["buy_volume"].resample(rule).sum()
+    bars["sell_volume"] = t["sell_volume"].resample(rule).sum()
+    bars = bars.dropna(subset=["open"])
+    total = float(t["size"].sum())
+    unsided = float(t["size"].sum() - t["buy_volume"].sum() - t["sell_volume"].sum())
+    out = _finalize(bars, "FUTURES")
+    out.attrs["unsided_volume_frac"] = unsided / total if total > 0 else 0.0
+    return out
+
+
 def load_databento_tbbo(
     dataset: str = "GLBX.MDP3",
     symbols: str | Sequence[str] = "ESZ5",
@@ -155,7 +260,11 @@ def load_databento_tbbo(
     order — 'A' (ask) for a sell aggressor, 'B' (bid) for a buy aggressor.
     Verify against a session you know before trusting the sign of delta; an
     inverted convention flips every conclusion in the protocol.
+
+    The symbol is checked by `databento_symbology` *before* any request is
+    made, so a request that would corrupt the tape never costs money.
     """
+    symbol, stype_in = databento_symbology(symbols)
     try:
         import databento as db
     except ImportError:
@@ -163,34 +272,14 @@ def load_databento_tbbo(
 
     client = db.Historical(api_key) if api_key else db.Historical()
     data = client.timeseries.get_range(
-        dataset=dataset, schema="tbbo", symbols=symbols,
+        dataset=dataset, schema="tbbo", symbols=symbol, stype_in=stype_in,
         start=start, end=end,
     )
     trades = data.to_df()
     if trades.empty:
         raise ValueError("Databento returned no trades for that range/symbol")
-
-    px = trades["price"].astype(float)
-    if px.median() > 1e6:  # fixed-point 1e-9, not converted by this client version
-        px = px / 1e9
-    ts = pd.to_datetime(trades.index if trades.index.name else trades["ts_event"],
-                        utc=True)
-
-    t = pd.DataFrame({"price": px.values, "size": trades["size"].astype(float).values,
-                      "side": trades["side"].astype(str).values}, index=ts)
-    t = t.tz_convert(ET)
-
-    is_sell = t["side"] == sell_aggressor_code
-    t["buy_volume"] = np.where(is_sell, 0.0, t["size"])
-    t["sell_volume"] = np.where(is_sell, t["size"], 0.0)
-
-    rule = f"{bar_minutes}min"
-    bars = t["price"].resample(rule).ohlc()
-    bars["volume"] = t["size"].resample(rule).sum()
-    bars["buy_volume"] = t["buy_volume"].resample(rule).sum()
-    bars["sell_volume"] = t["sell_volume"].resample(rule).sum()
-    bars = bars.dropna(subset=["open"])
-    return _finalize(bars, "FUTURES")
+    return tbbo_to_bars(trades, bar_minutes=bar_minutes,
+                        sell_aggressor_code=sell_aggressor_code)
 
 
 # ---------------------------------------------------------------------------

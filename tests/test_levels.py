@@ -200,6 +200,94 @@ def test_csv_loader_offsets_across_dst():
     print("  offset-carrying and naive timestamps both land on 09:30 ET across DST")
 
 
+def _tbbo_frame(rows):
+    """rows: (ts_recv, ts_event, price, size, side, instrument_id)."""
+    df = pd.DataFrame(rows, columns=["ts_recv", "ts_event", "price", "size", "side",
+                                     "instrument_id"])
+    for c in ("ts_recv", "ts_event"):
+        df[c] = pd.to_datetime(df[c], utc=True, format="ISO8601")
+    return df.set_index("ts_recv")
+
+
+def test_tbbo_unsided_trades_are_not_buys():
+    """Databento marks side N where the source gives none (auctions, some
+    opening prints). Counting those as buy aggression biases every delta up."""
+    from mesproto.levels import tbbo_to_bars
+    t0 = "2026-03-03 14:30:10"
+    trades = _tbbo_frame([
+        (t0, t0, 5000.00, 5, "B", 1),
+        (t0, t0, 5000.25, 3, "A", 1),
+        (t0, t0, 5000.00, 40, "N", 1),
+    ])
+    bars = tbbo_to_bars(trades)
+    bar = bars.iloc[0]
+    assert bar["volume"] == 48, bar["volume"]
+    assert bar["buy_volume"] == 5 and bar["sell_volume"] == 3, bar
+    assert bars.attrs["has_delta"]
+    print(f"  B=5 A=3 N=40 -> buy={bar['buy_volume']:.0f} sell={bar['sell_volume']:.0f} "
+          f"volume={bar['volume']:.0f}")
+
+
+def test_tbbo_bars_are_timed_by_ts_event():
+    """to_df() indexes by ts_recv (capture server). The matching-engine time
+    is ts_event; a trade at 09:30:59.999 must not slide into the 09:31 bar."""
+    from mesproto.levels import tbbo_to_bars
+    trades = _tbbo_frame([
+        ("2026-03-03 14:31:00.004", "2026-03-03 14:30:59.999", 5000.0, 1, "B", 1),
+        ("2026-03-03 14:31:10", "2026-03-03 14:31:10", 5001.0, 1, "B", 1),
+    ])
+    bars = tbbo_to_bars(trades)
+    assert [ts.time() for ts in bars.index] == [time(9, 30), time(9, 31)], bars.index
+    print("  trade stamped 09:30:59.999 by the exchange lands in the 09:30 bar")
+
+
+def test_tbbo_rejects_unknown_aggressor_code():
+    from mesproto.levels import tbbo_to_bars
+    trades = _tbbo_frame([("2026-03-03 14:30:10", "2026-03-03 14:30:10", 5000.0, 1, "B", 1)])
+    try:
+        tbbo_to_bars(trades, sell_aggressor_code="S")
+    except ValueError:
+        print("  sell_aggressor_code must be A or B")
+        return
+    raise AssertionError("an unknown aggressor code would silently zero one side")
+
+
+def test_tbbo_roll_inside_range_warns():
+    import warnings
+    from mesproto.levels import tbbo_to_bars
+    trades = _tbbo_frame([
+        ("2026-03-12 14:30:10", "2026-03-12 14:30:10", 5000.0, 1, "B", 101),
+        ("2026-03-13 14:30:10", "2026-03-13 14:30:10", 5040.0, 1, "B", 202),
+    ])
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        tbbo_to_bars(trades)
+    assert any("roll" in str(x.message).lower() for x in w), [str(x.message) for x in w]
+    print("  two instrument_ids in one tape -> roll warning")
+
+
+def test_databento_symbology_guards_single_expiry():
+    import warnings
+    from mesproto.levels import databento_symbology
+
+    assert databento_symbology("ESZ5") == ("ESZ5", "raw_symbol")
+    assert databento_symbology(["MESH6"]) == ("MESH6", "raw_symbol")
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        assert databento_symbology("ES.c.0") == ("ES.c.0", "continuous")
+    assert any("continuous" in str(x.message).lower() for x in w), \
+        "a continuous symbol must warn loudly"
+
+    for bad in (["ESZ5", "ESH6"], "ES.FUT", "ESZ5-ESH6", "ESZ5,ESH6"):
+        try:
+            databento_symbology(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} mixes instruments into one tape and must be refused")
+    print("  single expiry ok; continuous warns; parent/spread/multi refused")
+
+
 def test_load_news_dates():
     import os
     import tempfile

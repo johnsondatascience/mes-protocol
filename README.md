@@ -101,6 +101,15 @@ aggressor. `load_databento_tbbo(sell_aggressor_code=...)` exposes it because an
 inverted convention flips the sign of every delta conclusion in the protocol.
 Check one session against Optimus Flow before running a study on it.
 
+Trades with side `N` (no aggressor — auctions, some opening prints) count toward
+volume but not delta. Bars are timed by `ts_event`, not the `ts_recv` index that
+`to_df()` returns. Already have the file? `tbbo_to_bars(DBNStore.from_file(path).to_df())`
+converts it without paying for the request again.
+
+`load_databento_tbbo` refuses multiple symbols, parent symbology (`ES.FUT`) and
+spreads before any request is sent, and warns loudly on continuous symbols
+(`ES.c.0`) and on any tape that spans a roll.
+
 ## Tests
 
 ```bash
