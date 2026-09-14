@@ -132,9 +132,10 @@ def fills_to_log(fills: Sequence[Fill], contract: Contract, contracts: int = 1,
             "checklist_ok": int(s.checklist_ok),
             "grade": "A",   # generated trades have no execution quality to grade
             "source": source,
-            "notes": ("ambiguous_bar" if f.ambiguous_bar else "")
-            + ("|" + ";".join(f"{k}={v}" for k, v in s.checklist.items()
-                              if v is not True)),
+            "notes": "|".join(part for part in (
+                "ambiguous_bar" if f.ambiguous_bar else "",
+                ";".join(f"{k}={v}" for k, v in s.checklist.items() if v is not True),
+            ) if part),
         })
         tid += 1
     return pd.DataFrame(rows, columns=COLUMNS)

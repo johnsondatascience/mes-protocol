@@ -87,6 +87,8 @@ BURN_IN_TRADES = 30       # per setup, excluded from primary analysis
 FUTILITY_GATES = (60, 150)  # checkpoints at which the kill rule is applied
 GATE_CONFIDENCE = 0.80    # kill when the one-sided upper bound on mean R < MIN_EXPECTANCY_R
 GATE_SIGMA_FLOOR_R = 0.6 * ASSUMED_SIGMA_R  # a calm start cannot shrink the gate's bound
+BOOTSTRAP_CI = 0.95       # §06: report the 2.5/97.5 session-block percentiles
+CONFIRM_POWER = 0.80      # §01: power behind the confirmation sample size
 
 # --- reporting only (never feed a verdict) -------------------------------------
 CONFIRM_N_MIN_EFFECT_R = 0.05   # floor on the effect used for "n to confirm"

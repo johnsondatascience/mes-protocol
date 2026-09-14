@@ -27,6 +27,8 @@ FILL CONVENTIONS (deliberately pessimistic — do not "fix" these)
 * The fill bar is checked for the stop, never for the target. A stop entry
   whose fill bar spans the stop is scored a loss and flagged ambiguous; a
   limit fill bar that spans the stop is a certain loss.
+* An entry still resting at the signal's entry_deadline (a setup's stand-down
+  time) is cancelled, never filled.
 * Any position still open at RTH close exits at the closing price (TIME).
 """
 
@@ -65,6 +67,9 @@ class Signal:
     entry_style: EntryStyle
     checklist: dict = field(default_factory=dict)
     context: dict = field(default_factory=dict)
+    # a resting entry is cancelled at this ET time: a stand-down that only
+    # gated signals would still let an order placed at 14:59 fill at 15:28
+    entry_deadline: Optional[time] = None
 
     @property
     def risk_pts(self) -> float:
@@ -423,6 +428,7 @@ def generate_s3(
         out.append(Signal(
             setup="VWAP_CONT", session_date=lv.date, direction=direction,
             signal_time=ts, entry_px=entry, stop_px=stop, entry_style=entry_style,
+            entry_deadline=S3_ENTRY_CUTOFF,
             checklist={
                 "opened_outside_value": True,       # s3_gate
                 "one_timeframing": True,            # s3_gate, at confirm_at
@@ -470,6 +476,8 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
     for j, (ts, bar) in enumerate(after.iterrows()):
         if j >= max_wait_bars:
             break
+        if signal.entry_deadline is not None and ts.time() >= signal.entry_deadline:
+            break                       # stand-down reached: the order is cancelled
         if signal.entry_style == "LIMIT":
             # must trade strictly through the limit, not merely touch it
             hit = bar["low"] < signal.entry_px if sign > 0 else bar["high"] > signal.entry_px

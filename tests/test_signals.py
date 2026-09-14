@@ -14,7 +14,7 @@ from mesproto.config import ET, MES, S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS
 from mesproto.levels import build_sessions, load_dataframe_bars
 from mesproto.schema import fills_to_log, validate
 from mesproto.signals import (
-    Signal, generate_s1, generate_s3, run_all, simulate,
+    Fill, Signal, generate_s1, generate_s3, run_all, simulate,
 )
 from mesproto.evaluate import compute_r
 
@@ -468,6 +468,46 @@ def test_s3_signals_survive_truncation():
     bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
     sigs = assert_signals_survive_truncation(generate_s3, bars, d1)
     print(f"  {len(sigs)} S3 signals reproducible from truncated tape")
+
+
+def test_resting_entry_cancelled_at_stand_down():
+    """A stand-down applies to fills, not just signals. An S3 order resting
+    at 14:55 must not fill at 15:05, after the 15:00 cutoff."""
+    import dataclasses
+    from mesproto.config import S3_ENTRY_CUTOFF
+    d = date(2026, 3, 3)
+    before = (15 * 60 + 5) - (9 * 60 + 30)                 # bars up to 15:05
+    path = np.concatenate([np.full(before, 5010.0), np.full(390 - before, 4999.0)])
+    bars = load_dataframe_bars(bars_from_path(d, path, wick=0.5), source="FUTURES")
+    at_1455 = bars.index[bars.index.time == time(14, 55)][0]
+    sig = Signal(setup="VWAP_CONT", session_date=d, direction="LONG",
+                 signal_time=at_1455, entry_px=5000.0, stop_px=4994.0,
+                 entry_style="LIMIT", entry_deadline=S3_ENTRY_CUTOFF)
+    assert simulate(dataclasses.replace(sig, entry_deadline=None), bars, MES).filled, \
+        "fixture must fill when no deadline applies"
+    assert simulate(sig, bars, MES).filled is False
+
+    bars3, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
+    sigs = generate_s3(bars3, lv[d1], MES)
+    assert sigs and all(s.entry_deadline == S3_ENTRY_CUTOFF for s in sigs)
+    print("  order resting past 15:00 cancelled; S3 signals carry the deadline")
+
+
+def test_log_notes_only_list_real_flags():
+    d = date(2026, 3, 3)
+    ts = pd.Timestamp.combine(d, time(10, 30)).tz_localize(ET)
+    clean = Signal(setup="IB_BREAK", session_date=d, direction="LONG", signal_time=ts,
+                   entry_px=5000.0, stop_px=4996.0, entry_style="LIMIT",
+                   checklist={"a": True, "b": True})
+    flagged = Signal(setup="IB_BREAK", session_date=d, direction="LONG", signal_time=ts,
+                     entry_px=5000.0, stop_px=4996.0, entry_style="LIMIT",
+                     checklist={"a": True, "delta_confirmed": None})
+    fills = [Fill(clean, True, ts, 5000.0, ts, 5008.0, "TARGET", 3, False),
+             Fill(clean, True, ts, 5000.0, ts, 4996.0, "STOP", 1, True),
+             Fill(flagged, True, ts, 5000.0, ts, 5008.0, "TARGET", 3, False)]
+    notes = fills_to_log(fills, MES)["notes"].tolist()
+    assert notes == ["", "ambiguous_bar", "delta_confirmed=None"], notes
+    print(f"  notes: {notes}")
 
 
 def test_pipeline_produces_valid_log():

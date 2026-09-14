@@ -57,8 +57,9 @@ import pandas as pd
 from scipy.stats import norm
 
 from .config import (
-    ALPHA, BURN_IN_TRADES, CONFIRM_N_MIN_EFFECT_R, CONFIRM_N_MIN_SIGMA_R,
-    CONTRACTS, DAY_TYPE_MIN_TRADES, FUTILITY_GATES, GATE_CONFIDENCE,
+    ALPHA, BOOTSTRAP_CI, BURN_IN_TRADES, CONFIRM_N_MIN_EFFECT_R,
+    CONFIRM_N_MIN_SIGMA_R, CONFIRM_POWER, CONTRACTS, DAY_TYPE_MIN_TRADES,
+    FUTILITY_GATES, GATE_CONFIDENCE,
     GATE_SIGMA_FLOOR_R, MES, MIN_EXPECTANCY_R, Contract,
 )
 from .schema import validate
@@ -208,7 +209,14 @@ def futility_verdict(r_chronological: Sequence[float], min_exp: float,
     return GateResult("PASSED", n, min_exp, last[0], last[1])
 
 
-def confirm_n(mu, sigma, alpha, power=0.80):
+def bootstrap_ci(boot: np.ndarray, level: float = BOOTSTRAP_CI) -> tuple[float, float]:
+    """Two-sided percentile interval of a bootstrap distribution."""
+    tail = (1.0 - level) / 2.0 * 100.0
+    lo, hi = np.percentile(boot, [tail, 100.0 - tail])
+    return float(lo), float(hi)
+
+
+def confirm_n(mu, sigma, alpha, power=CONFIRM_POWER):
     return (norm.ppf(1 - alpha) + norm.ppf(power)) ** 2 * sigma ** 2 / mu ** 2
 
 
@@ -242,7 +250,7 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
         wins = (g["R"] > 0).sum()
 
         boot = block_bootstrap_mean(g, n_boot=n_boot)
-        lo, hi = np.percentile(boot, [2.5, 97.5])
+        lo, hi = bootstrap_ci(boot)
         p_le_0 = (boot <= 0).mean()
 
         print(f"\n--- {setup} " + "-" * (72 - len(setup)))
@@ -251,14 +259,14 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
         print(f"  sd={sigma:.3f}R  worst={g['R'].min():+.2f}R  best={g['R'].max():+.2f}R")
         print(f"  net P&L=${g['pnl_usd'].sum():,.0f}  "
               f"avg risk=${g['risk_usd'].mean():,.0f}/trade")
-        print(f"  session-block bootstrap 95% CI on mean R: "
+        print(f"  session-block bootstrap {BOOTSTRAP_CI:.0%} CI on mean R: "
               f"[{lo:+.3f}, {hi:+.3f}]   P(mean<=0)={p_le_0:.3f}")
         print(f"  gate: {futility_verdict(g['R'].to_numpy(), min_exp)}")
         if not np.isnan(sigma) and mean_r > 0:
             need = confirm_n(max(mean_r, CONFIRM_N_MIN_EFFECT_R),
                              max(sigma, CONFIRM_N_MIN_SIGMA_R), alpha)
-            print(f"  n to confirm this effect at alpha={alpha}, 80% power: {need:.0f} "
-                  f"({need - n:+.0f} more)")
+            print(f"  n to confirm this effect at alpha={alpha}, "
+                  f"{CONFIRM_POWER:.0%} power: {need:.0f} ({need - n:+.0f} more)")
 
         # day-type conditioning
         if g["day_type"].nunique() > 1:
@@ -289,9 +297,9 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
 
     print("PORTFOLIO (primary sample, all setups)")
     boot = block_bootstrap_mean(primary, n_boot=n_boot)
-    lo, hi = np.percentile(boot, [2.5, 97.5])
+    lo, hi = bootstrap_ci(boot)
     print(f"  n={len(primary)}  mean={primary['R'].mean():+.3f}R  "
-          f"95% CI [{lo:+.3f}, {hi:+.3f}]  net ${primary['pnl_usd'].sum():,.0f}")
+          f"{BOOTSTRAP_CI:.0%} CI [{lo:+.3f}, {hi:+.3f}]  net ${primary['pnl_usd'].sum():,.0f}")
     daily = primary.groupby("session_date")["pnl_usd"].sum()
     print(f"  daily P&L: mean ${daily.mean():,.0f}  sd ${daily.std():,.0f}  "
           f"worst ${daily.min():,.0f}  win days {((daily>0).mean()):.0%}")
