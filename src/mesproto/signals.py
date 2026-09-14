@@ -24,6 +24,9 @@ FILL CONVENTIONS (deliberately pessimistic — do not "fix" these)
 * If a single bar's range covers both stop and target, the STOP is assumed to
   have been hit first. Bar data cannot resolve the sequence, and assuming the
   favorable ordering is how backtests manufacture edges that evaporate live.
+* The fill bar is checked for the stop, never for the target. A stop entry
+  whose fill bar spans the stop is scored a loss and flagged ambiguous; a
+  limit fill bar that spans the stop is a certain loss.
 * Any position still open at RTH close exits at the closing price (TIME).
 """
 
@@ -97,7 +100,9 @@ class Fill:
     exit_px: Optional[float] = None
     exit_reason: Optional[str] = None
     bars_held: int = 0
-    ambiguous_bar: bool = False    # stop and target both inside one bar's range
+    # the exit depended on an intrabar order OHLC cannot show: stop and target
+    # inside one bar, or a stop entry's fill bar that also spans the stop
+    ambiguous_bar: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -134,18 +139,25 @@ def generate_s1(
 ) -> list[Signal]:
     """Break of the IB between 10:00 and 11:30, entered on the retest.
 
-    State machine: WAITING -> BROKEN (close beyond the IB edge) -> RETEST
-    (price returns to the edge without re-entering by more than
+    State machine: WAITING -> BROKEN (close crosses the IB edge from inside)
+    -> RETEST (price returns to the edge without re-entering by more than
     S1_RETEST_MAX_REENTRY_PTS) -> emit.
+
+    A break is a *crossing*. Price that stays beyond the edge after a signal,
+    a failed retest, or a stand-down is still the same break; re-arming on
+    every close beyond the edge would log one idea as several correlated
+    trades and overweight whichever sessions hovered there.
     """
     out: list[Signal] = []
     if not lv.s1_gate():
         return out
 
     rth = rth_slice(bars, lv.date)
-    win = rth[_between(rth.index, *S1_BREAK_WINDOW)]
+    win_mask = _between(rth.index, *S1_BREAK_WINDOW)
+    win = rth[win_mask]
     if win.empty:
         return out
+    prev_close = rth["close"].shift(1)[win_mask].to_numpy()
 
     delta = _bar_delta(rth)
     cum = delta.cumsum() if delta is not None else None
@@ -158,9 +170,10 @@ def generate_s1(
 
     for i, (ts, bar) in enumerate(win.iterrows()):
         if state == "WAITING":
-            if bar["close"] > lv.ib_high:
+            pc = prev_close[i]
+            if bar["close"] > lv.ib_high and not pc > lv.ib_high:
                 state, direction, edge, break_i = "BROKEN", "LONG", lv.ib_high, i
-            elif bar["close"] < lv.ib_low:
+            elif bar["close"] < lv.ib_low and not pc < lv.ib_low:
                 state, direction, edge, break_i = "BROKEN", "SHORT", lv.ib_low, i
             if state == "BROKEN":
                 # anchor is the swing the stop goes BEYOND: the pullback low on
@@ -186,16 +199,21 @@ def generate_s1(
             continue
 
         # delta confirmation: cumulative delta made a new session extreme in the
-        # break direction within N bars of the break
+        # break direction on the break bar or within N bars after it. Only bars
+        # through the current one are visible. While that window is still open
+        # and unconfirmed the condition is pending, not failed — a later retest
+        # bar may complete it — so nothing is emitted yet.
         delta_ok: Optional[bool] = None
         if cum is not None:
             b_ts = win.index[break_i]
-            window_end = min(break_i + S1_DELTA_CONFIRM_BARS + 1, len(win))
-            seg = cum.loc[b_ts:win.index[window_end - 1]]
-            prior = cum.loc[:b_ts]
+            last_i = min(break_i + S1_DELTA_CONFIRM_BARS, i)
+            seg = cum.loc[b_ts:win.index[last_i]]
+            prior = cum[cum.index < b_ts]
             if len(seg) and len(prior):
                 delta_ok = bool(seg.max() > prior.max()) if direction == "LONG" \
                     else bool(seg.min() < prior.min())
+            if delta_ok is False and i < break_i + S1_DELTA_CONFIRM_BARS:
+                continue
 
         entry = edge + sign * contract.tick
         raw_stop = retest_extreme - sign * 1.0   # 1 pt beyond the retest swing
@@ -408,6 +426,20 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
 
     risk = abs(entry_px - signal.stop_px)
     target = entry_px + sign * MECHANICAL_TARGET_R * risk
+
+    # The fill bar is checked for the stop and never for the target. A limit
+    # long fills on the way down, so a fill bar whose low also takes out the
+    # stop was stopped on that same move — certain, not ambiguous. A stop
+    # entry's bar could have printed the stop before the trigger; the order
+    # is unknowable, so the loss is assumed and the bar flagged. Either way,
+    # skipping the fill bar would let a later bar score a TARGET on a trade
+    # that was already dead.
+    fill_bar = after.loc[entry_time]
+    if (fill_bar["low"] <= signal.stop_px) if sign > 0 \
+            else (fill_bar["high"] >= signal.stop_px):
+        return Fill(signal, True, entry_time, entry_px, entry_time,
+                    signal.stop_px, "STOP", 0, signal.entry_style == "STOP")
+
     held = 0
     ambiguous = False
 

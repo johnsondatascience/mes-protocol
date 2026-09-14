@@ -62,7 +62,8 @@ Data flow: `bars -> build_sessions -> run_all -> fills_to_log -> compute_r -> re
 3. **Fill conventions stay pessimistic.** Limit entries require trading
    *strictly through* the level. Stop entries pay a tick. When one bar contains
    both stop and target, the **stop** is assumed first and `ambiguous_bar` is
-   flagged. Every one of these is pinned by a test in `test_signals.py`. A
+   flagged. The fill bar is checked for the stop and never for the target.
+   Every one of these is pinned by a test in `test_signals.py`. A
    request to make fills "more realistic" is almost always a request to make
    them more favorable — push back and ask for the specific evidence.
 4. **`checklist_ok` is False when a condition could not be verified.** A signal

@@ -84,10 +84,12 @@ def main() -> int:
 
     amb = log["notes"].str.contains("ambiguous_bar").sum()
     if amb:
-        print(f"NOTE: {amb} trades resolved on a bar containing both stop and "
-              f"target. Those were scored as losses by convention; if they are a "
-              f"large share of the sample, the bar-level result is unreliable and "
-              f"only replay can settle it.")
+        print(f"NOTE: {amb} of {len(log)} trades ({amb / len(log):.0%}) resolved on "
+              f"a bar whose intrabar order OHLC cannot show (stop and target in "
+              f"one bar, or a stop entry's fill bar spanning the stop). Those were "
+              f"scored as losses by convention; if they are a large share of the "
+              f"sample, the bar-level result is unreliable and only replay can "
+              f"settle it.")
     return 0
 
 

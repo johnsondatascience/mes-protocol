@@ -191,6 +191,152 @@ def test_stop_entry_pays_slippage():
     print(f"  stop entry filled at {f.entry_px} (signal {sig.entry_px} + 1 tick)")
 
 
+def test_limit_fill_bar_through_stop_is_a_loss():
+    """A limit long that fills on a bar whose low also takes out the stop was
+    filled on the way down and stopped on the same way down. Skipping the
+    entry bar and letting a later rally score a TARGET turns a certain loss
+    into a win."""
+    d = date(2026, 3, 3)
+    path = np.concatenate([np.full(11, 5010.0), np.full(379, 5020.0)])
+    bars = bars_from_path(d, path, wick=0.5)
+    ts = bars.index[10]
+    bars.loc[ts, ["high", "low"]] = [5010.5, 4990.0]   # through entry AND stop
+    bars = load_dataframe_bars(bars, source="FUTURES")
+
+    sig = Signal(setup="IB_BREAK", session_date=d, direction="LONG",
+                 signal_time=bars.index[5], entry_px=5000.0, stop_px=4996.0,
+                 entry_style="LIMIT")
+    f = simulate(sig, bars, MES)
+    assert f.filled and f.entry_time == ts, (f.filled, f.entry_time)
+    assert f.exit_reason == "STOP", f.exit_reason
+    assert f.exit_time == ts and f.exit_px == 4996.0, (f.exit_time, f.exit_px)
+    print(f"  limit filled and stopped on the same bar -> {f.exit_reason}")
+
+
+def test_stop_entry_bar_spanning_stop_is_a_flagged_loss():
+    """A stop entry whose fill bar also spans the protective stop cannot be
+    sequenced from OHLC. The stop is assumed and the bar is flagged."""
+    d = date(2026, 3, 3)
+    path = np.concatenate([np.full(11, 5000.0), np.full(379, 5030.0)])
+    bars = bars_from_path(d, path, wick=0.5)
+    ts = bars.index[10]
+    bars.loc[ts, ["high", "low"]] = [5011.0, 5003.0]
+    bars = load_dataframe_bars(bars, source="FUTURES")
+
+    sig = Signal(setup="IB_BREAK", session_date=d, direction="LONG",
+                 signal_time=bars.index[5], entry_px=5010.0, stop_px=5004.0,
+                 entry_style="STOP")
+    f = simulate(sig, bars, MES)
+    assert f.filled and f.entry_time == ts, (f.filled, f.entry_time)
+    assert f.exit_reason == "STOP", f.exit_reason
+    assert f.ambiguous_bar is True
+    print(f"  stop entry bar spanned the stop -> {f.exit_reason}, flagged")
+
+
+# --- look-ahead in generators ------------------------------------------------
+
+S1_LOOKAHEAD_DATE = date(2026, 3, 3)
+
+
+def s1_quick_retest_bars(break_delta, retest_deltas):
+    """IB 4989.5-5010.5, close-through break at 10:00, retests from 10:01.
+
+    Cumulative delta climbs to +3000 through the IB. The break bar and the
+    bars after it get the explicit per-bar deltas passed in, so a test can
+    place the new delta extreme exactly where it wants it.
+    """
+    d0, d1 = date(2026, 3, 2), S1_LOOKAHEAD_DATE
+    ib = np.concatenate([np.linspace(5000, 5010, 8), np.linspace(5010, 4990, 15),
+                         np.linspace(4990, 5002, 7)])
+    brk = np.array([5012.0])
+    retest = np.full(5, 5011.0)
+    rally = np.linspace(5011, 5040, 30)
+    path = np.concatenate([ib, brk, retest, rally])
+    path = np.concatenate([path, np.full(390 - len(path), 5040.0)])
+
+    day = bars_from_path(d1, path, overnight_center=5000.0)
+    rth = (day.index.date == d1) & (day.index.time >= time(9, 30))
+    deltas = np.full(390, 50.0)
+    deltas[:30] = 100.0
+    deltas[30] = break_delta
+    deltas[31:31 + len(retest_deltas)] = retest_deltas
+    vol = day.loc[rth, "volume"].to_numpy()
+    day.loc[rth, "buy_volume"] = (vol + deltas) / 2
+    day.loc[rth, "sell_volume"] = (vol - deltas) / 2
+
+    bars = load_dataframe_bars(pd.concat([prior_balance_day(d0), day]).sort_index(),
+                               source="FUTURES")
+    return bars
+
+
+def _decision(sig):
+    """The fields a trader acts on. Context (e.g. day_type, which the protocol
+    defines at 11:00 for every trade) is descriptive and excluded."""
+    return (sig.signal_time, sig.direction, sig.entry_px, sig.stop_px,
+            sig.entry_style, dict(sig.checklist))
+
+
+def assert_signals_survive_truncation(generator, bars, d):
+    """Re-run the generator on the tape cut at each signal's bar. A signal
+    that changes, or disappears, was using bars that had not printed yet."""
+    full = [s for s in generator(bars, {x.date: x for x in
+                                        build_sessions(bars, tick=TICK)}[d], MES)]
+    assert full, "fixture should produce at least one signal"
+    for s in full:
+        cut = bars[bars.index <= s.signal_time].copy()
+        cut.attrs.update(bars.attrs)
+        lv_cut = {x.date: x for x in build_sessions(cut, tick=TICK)}[d]
+        seen = [_decision(x) for x in generator(cut, lv_cut, MES)
+                if x.signal_time == s.signal_time]
+        assert _decision(s) in seen, (
+            f"signal at {s.signal_time.time()} not reproducible from bars "
+            f"through that time: full={_decision(s)} truncated={seen}")
+    return full
+
+
+def test_s1_delta_confirmation_never_reads_future_bars():
+    # new cumulative-delta high prints at 10:02; retest bars start at 10:01
+    bars = s1_quick_retest_bars(break_delta=-200.0,
+                                retest_deltas=[-100.0, 1000.0, 50.0, 50.0, 50.0])
+    sigs = generate_s1(bars, {x.date: x for x in
+                              build_sessions(bars, tick=TICK)}[S1_LOOKAHEAD_DATE], MES)
+    for s in sigs:
+        if s.checklist["delta_confirmed"] is True:
+            assert s.signal_time.time() >= time(10, 2), s.signal_time
+    assert_signals_survive_truncation(generate_s1, bars, S1_LOOKAHEAD_DATE)
+    print("  " + "; ".join(f"{s.signal_time.time()} delta={s.checklist['delta_confirmed']}"
+                           for s in sigs))
+
+
+def test_s1_break_bar_itself_can_confirm_delta():
+    """'New session extreme within 3 bars of the break' includes the break bar."""
+    bars = s1_quick_retest_bars(break_delta=500.0,
+                                retest_deltas=[-50.0, -50.0, -50.0, -50.0, -50.0])
+    sigs = generate_s1(bars, {x.date: x for x in
+                              build_sessions(bars, tick=TICK)}[S1_LOOKAHEAD_DATE], MES)
+    assert sigs, "expected an S1 signal on the quick retest"
+    assert sigs[0].checklist["delta_confirmed"] is True, sigs[0].checklist
+    print(f"  break-bar delta extreme confirmed at {sigs[0].signal_time.time()}")
+
+
+def test_s1_one_signal_per_break():
+    """Price sitting above the IB after a signal is the same break, not a new
+    one. A break is a close crossing the edge from inside; re-arming on every
+    close beyond it would log one idea as several correlated trades."""
+    bars = s1_quick_retest_bars(break_delta=500.0,
+                                retest_deltas=[-50.0, -50.0, -50.0, -50.0, -50.0])
+    sigs = generate_s1(bars, {x.date: x for x in
+                              build_sessions(bars, tick=TICK)}[S1_LOOKAHEAD_DATE], MES)
+    assert len(sigs) == 1, [s.signal_time.time() for s in sigs]
+    print(f"  one break, one signal at {sigs[0].signal_time.time()}")
+
+
+def test_s3_signals_survive_truncation():
+    bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
+    sigs = assert_signals_survive_truncation(generate_s3, bars, d1)
+    print(f"  {len(sigs)} S3 signals reproducible from truncated tape")
+
+
 def test_pipeline_produces_valid_log():
     bars, lv, d1 = build_two_days(s1_path())
     fills = run_all(bars, list(lv.values()), MES)
