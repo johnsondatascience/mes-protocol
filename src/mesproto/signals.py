@@ -301,23 +301,33 @@ def _otf_confirm_time(rth: pd.DataFrame, cutoff: time) -> Optional[pd.Timestamp]
     return None
 
 
-def _delta_at_extreme_with_trend(delta: Optional[pd.Series], until: pd.Timestamp,
-                                 direction: Direction) -> Optional[bool]:
-    """Is cumulative delta at its session extreme in the trend's direction,
-    using bars that closed before `until`?
+def _delta_extreme_in_confirming_bar(delta: Optional[pd.Series],
+                                     confirm_at: pd.Timestamp,
+                                     direction: Direction) -> Optional[bool]:
+    """Did cumulative delta make a new session extreme, in the trend's
+    direction, during the 30-minute bar that confirmed one-timeframing?
 
-    Direction matters: an up-trend with delta pinned at its session *low* is
-    price and flow diverging, the opposite of what the S3 day gate asks for.
-    None when there is no delta to check.
+    Read at the same resolution as the price condition it accompanies: price
+    one-timeframes when a 30-minute bar extends the range; flow agrees when
+    that same bar carries cumulative delta to a new session extreme. Demanding
+    the extreme on the last minute before confirmation failed trend days whose
+    buying paused for a minute or two.
+
+    Direction matters: an up-trend whose delta high was set earlier and not
+    exceeded in the confirming bar has stopped agreeing with price. None when
+    there is no delta, or no bars before the confirming bar to compare with.
     """
     if delta is None:
         return None
     cum = delta.cumsum()
-    seen = cum[cum.index < until]
-    if len(seen) < 2:
+    bar_start = confirm_at - pd.Timedelta(minutes=OTF_BAR_MINUTES)
+    before = cum[cum.index < bar_start]
+    during = cum[(cum.index >= bar_start) & (cum.index < confirm_at)]
+    if before.empty or during.empty:
         return None
-    last = seen.iloc[-1]
-    return bool(last >= seen.max()) if direction == "LONG" else bool(last <= seen.min())
+    if direction == "LONG":
+        return bool(during.max() > before.max())
+    return bool(during.min() < before.min())
 
 
 def generate_s3(
@@ -328,8 +338,10 @@ def generate_s3(
 
     Day gate, all confirmed before any entry: opened outside prior value,
     one-timeframing on 30-minute bars, and cumulative delta at a session
-    extreme with price. A gate condition known to fail returns []; one the
-    data cannot check (no delta) is recorded as None and flags every signal.
+    extreme with price — read as a new session extreme during the 30-minute
+    bar that confirmed one-timeframing. A gate condition known to fail
+    returns []; one the data cannot check (no delta) is recorded as None and
+    flags every signal.
 
     Stand-downs are enforced bar by bar: no entries after S3_ENTRY_CUTOFF, and
     none once VWAP has been crossed more than S3_MAX_VWAP_CROSSES times — that
@@ -353,7 +365,7 @@ def generate_s3(
     vwap = lv.vwap
     delta = _bar_delta(rth)
 
-    delta_at_extreme = _delta_at_extreme_with_trend(delta, confirm_at, direction)
+    delta_at_extreme = _delta_extreme_in_confirming_bar(delta, confirm_at, direction)
     if delta_at_extreme is False:
         return out
     crosses = running_crosses(rth["close"], vwap)

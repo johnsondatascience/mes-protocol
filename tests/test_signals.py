@@ -422,6 +422,46 @@ def test_s3_delta_diverging_from_trend_fails_day_gate():
     print("  diverging delta -> no S3 signals")
 
 
+def _with_day2_deltas(bars, d, deltas):
+    """Overwrite day-2 RTH buy/sell volume so bar deltas equal `deltas`."""
+    out = bars.copy()
+    rth = (out.index.date == d) & (out.index.time >= time(9, 30))
+    vol = out.loc[rth, "volume"].to_numpy()
+    out.loc[rth, "buy_volume"] = (vol + deltas) / 2
+    out.loc[rth, "sell_volume"] = (vol - deltas) / 2
+    out.attrs.update(bars.attrs)
+    return out, {s.date: s for s in build_sessions(out, tick=TICK)}
+
+
+def test_s3_delta_high_inside_confirming_bar_passes_gate():
+    """Delta makes its session high at 10:45, inside the 10:30-11:00 bar that
+    confirms one-timeframing, then eases for a few minutes. Flow agreed with
+    price on the bar that confirmed the trend; a one-minute pause before the
+    close of that bar must not fail the day."""
+    bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
+    deltas = np.full(390, 100.0)
+    deltas[:76] = 300.0          # 09:30-10:45 buying, new highs
+    deltas[76:90] = -100.0       # 10:46-10:59 eases off its high
+    bars, lv = _with_day2_deltas(bars, d1, deltas)
+    sigs = generate_s3(bars, lv[d1], MES)
+    assert sigs, "delta high inside the confirming bar should pass the day gate"
+    assert all(s.checklist["delta_at_extreme"] is True for s in sigs)
+    print(f"  high at 10:45, eased by 10:59 -> {len(sigs)} S3 signal(s)")
+
+
+def test_s3_delta_high_before_confirming_bar_fails_gate():
+    """Loosened is not 'anything goes': delta whose session high was set
+    before 10:30 and not exceeded in the confirming bar has stopped agreeing."""
+    bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
+    deltas = np.full(390, 100.0)
+    deltas[:46] = 300.0          # 09:30-10:15 buying
+    deltas[46:90] = -50.0        # 10:16-10:59 no new high
+    bars, lv = _with_day2_deltas(bars, d1, deltas)
+    assert lv[d1].s3_gate() is True
+    assert generate_s3(bars, lv[d1], MES) == []
+    print("  high at 10:15, none in the confirming bar -> no S3 signals")
+
+
 def test_s3_delta_extreme_unverifiable_without_delta():
     bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
     stripped = bars.copy()
