@@ -13,13 +13,16 @@ from typing import Optional, Sequence
 
 import pandas as pd
 
-from .config import Contract
+from .config import OFF_CHECKLIST_WARN_FRAC, Contract
 from .signals import Fill
 
 SETUPS = ("IB_BREAK", "LEVEL2LEVEL", "VWAP_CONT", "ABSORPTION", "ON_INVENTORY",
           "IB_FAIL")
 EXIT_REASONS = ("TARGET", "STOP", "TIME", "MANUAL", "BREAKEVEN")
 DAY_TYPES = ("TREND_UP", "TREND_DOWN", "BALANCE", "DOUBLE_DIST", "UNCLASSIFIED")
+DIRECTIONS = ("LONG", "SHORT")
+GRADES = ("A", "B", "C")
+OPTIONAL_COLUMNS = ("notes", "source")
 
 COLUMNS = [
     "trade_id", "session_date", "setup", "direction", "entry_time",
@@ -42,10 +45,16 @@ class ValidationResult:
 
 
 def validate(df: pd.DataFrame) -> ValidationResult:
+    """Reject logs the evaluator would silently misread.
+
+    The costly failures are the quiet ones: a direction typo that compute_r
+    scores as SHORT, a stop on the wrong side that still has positive risk
+    distance, a checklist flag of 2 that is neither in nor out of the sample.
+    """
     errors: list[str] = []
     warnings: list[str] = []
 
-    missing = [c for c in COLUMNS if c not in df.columns and c != "notes"]
+    missing = [c for c in COLUMNS if c not in df.columns and c not in OPTIONAL_COLUMNS]
     if missing:
         errors.append(f"missing columns: {missing}")
         return ValidationResult(False, errors, warnings)
@@ -59,20 +68,40 @@ def validate(df: pd.DataFrame) -> ValidationResult:
     bad_day = set(df["day_type"].dropna()) - set(DAY_TYPES)
     if bad_day:
         errors.append(f"unknown day_type values: {sorted(bad_day)}")
+    direction = df["direction"].astype(str).str.upper()
+    bad_dir = set(direction) - set(DIRECTIONS)
+    if bad_dir:
+        errors.append(f"unknown direction values: {sorted(bad_dir)}")
+    bad_flag = ~df["checklist_ok"].isin([0, 1])
+    if bad_flag.any():
+        errors.append(f"{int(bad_flag.sum())} rows have checklist_ok not in {{0, 1}}")
+    bad_grade = set(df["grade"].dropna()) - set(GRADES)
+    if bad_grade:
+        errors.append(f"unknown grade values: {sorted(bad_grade)}")
+    if (df["contracts"] <= 0).any():
+        errors.append(f"{int((df['contracts'] <= 0).sum())} rows have contracts <= 0")
 
     risk = (df["entry_px"] - df["stop_px"]).abs()
     if (risk <= 0).any():
         errors.append(f"{int((risk <= 0).sum())} rows have zero/negative risk distance")
+    wrong_side = ((direction == "LONG") & (df["stop_px"] > df["entry_px"])) \
+        | ((direction == "SHORT") & (df["stop_px"] < df["entry_px"]))
+    if wrong_side.any():
+        errors.append(f"{int(wrong_side.sum())} rows have the stop on the wrong side "
+                      "of entry for their direction")
     if df["trade_id"].duplicated().any():
         errors.append("duplicate trade_id values")
 
     if "UNCLASSIFIED" in set(df["day_type"].dropna()):
         warnings.append("some rows are UNCLASSIFIED — day-type conditioning "
                         "will exclude them")
-    if (df["checklist_ok"] == 0).mean() > 0.25:
-        warnings.append(f"{(df['checklist_ok'] == 0).mean():.0%} of rows have "
-                        "checklist_ok=0 — that is a discipline signal, not a "
-                        "data problem, but the primary sample will be small")
+    off = (df["checklist_ok"] == 0).mean()
+    if off > OFF_CHECKLIST_WARN_FRAC:
+        generated = "source" in df.columns and (df["source"] == "GENERATED").all()
+        why = ("conditions the data could not verify (None) or that failed"
+               if generated else "a discipline signal, not a data problem")
+        warnings.append(f"{off:.0%} of rows have checklist_ok=0 — {why}; "
+                        "the primary sample will be small")
     return ValidationResult(not errors, errors, warnings)
 
 

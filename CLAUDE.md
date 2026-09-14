@@ -113,6 +113,7 @@ A setup generator is complete when all of the following hold:
 ```bash
 PYTHONPATH=src python3 tests/test_levels.py
 PYTHONPATH=src python3 tests/test_signals.py
+PYTHONPATH=src python3 tests/test_evaluate.py
 # or
 pip install -e ".[dev]" && pytest
 ```

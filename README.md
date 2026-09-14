@@ -116,12 +116,26 @@ spreads before any request is sent, and warns loudly on continuous symbols
 pytest                                    # or run the files directly
 PYTHONPATH=src python3 tests/test_levels.py
 PYTHONPATH=src python3 tests/test_signals.py
+PYTHONPATH=src python3 tests/test_evaluate.py
 ```
 
 Synthetic price paths only — no network, no data files. The load-bearing tests
 are `test_no_lookahead` (mutates the tape after the classification cutoff and
-asserts nothing upstream moves) and the fill-convention tests in
-`test_signals.py`.
+asserts nothing upstream moves), the truncation tests in `test_signals.py`
+(every signal must be reproducible from the tape cut at its own bar), the
+fill-convention tests, and the gate tests in `test_evaluate.py` (thresholds
+pinned to the protocol's §06 table, decided only at fixed checkpoints).
+
+## Evaluation rules the CLI enforces
+
+- R is net of the **execution contract's** costs (`--contract`, default MES).
+- The first `BURN_IN_TRADES` (30) trades of each setup, by time, are burn-in and
+  excluded — whatever their checklist.
+- `checklist_ok=0` trades are excluded after burn-in.
+- The futility gate is decided at n = 60 and n = 150 on the trades that existed
+  at that checkpoint. A kill at 60 stays a kill.
+- Logs are validated first: unknown direction/setup/grade, checklist flags other
+  than 0/1, and stops on the wrong side of entry are errors.
 
 ## Contributing
 

@@ -76,6 +76,14 @@ ALPHA = 0.05 / N_SETUPS_TESTED
 ASSUMED_SIGMA_R = 1.5     # for planning only; the bootstrap uses the real thing
 BURN_IN_TRADES = 30       # per setup, excluded from primary analysis
 FUTILITY_GATES = (60, 150)  # checkpoints at which the kill rule is applied
+GATE_CONFIDENCE = 0.80    # kill when the one-sided upper bound on mean R < MIN_EXPECTANCY_R
+GATE_SIGMA_FLOOR_R = 0.6 * ASSUMED_SIGMA_R  # a calm start cannot shrink the gate's bound
+
+# --- reporting only (never feed a verdict) -------------------------------------
+CONFIRM_N_MIN_EFFECT_R = 0.05   # floor on the effect used for "n to confirm"
+CONFIRM_N_MIN_SIGMA_R = 1.0     # floor on the sigma used for "n to confirm"
+DAY_TYPE_MIN_TRADES = 5         # smallest day-type bucket worth printing
+OFF_CHECKLIST_WARN_FRAC = 0.25  # validate() warns above this share of checklist_ok=0
 
 # --- setup parameters (pre-registered — changing one restarts the sample) -----
 S1_IB_RANGE_MIN_PCT = 0.0025

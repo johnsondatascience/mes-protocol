@@ -21,6 +21,7 @@ from mesproto import (  # noqa: E402
     CONTRACTS, build_sessions, fills_to_log, load_csv_bars,
     load_databento_tbbo, load_news_dates, sessions_to_frame, validate,
 )
+from mesproto.config import ALPHA, BURN_IN_TRADES, MIN_EXPECTANCY_R  # noqa: E402
 from mesproto.evaluate import compute_r, report  # noqa: E402
 from mesproto.signals import run_all  # noqa: E402
 
@@ -43,6 +44,8 @@ def main() -> int:
                          "S1 signals before 10:30 cannot verify the stand-down and "
                          "are flagged out of the primary sample")
     ap.add_argument("--contracts", type=int, default=1)
+    ap.add_argument("--burn-in", type=int, default=BURN_IN_TRADES,
+                    help="pre-registered burn-in trades per setup, applied uniformly")
     ap.add_argument("--out", default="data/generated_trades.csv")
     ap.add_argument("--n-boot", type=int, default=10000)
     args = ap.parse_args()
@@ -88,9 +91,10 @@ def main() -> int:
     log.to_csv(args.out, index=False)
     print(f"\nwrote {len(log)} trades -> {args.out}")
 
-    scored = compute_r(log)
+    scored = compute_r(log, contract=contract)
     scored["session_date"] = scored["session_date"].astype("datetime64[ns]")
-    report(scored, min_exp=0.15, alpha=0.01, n_boot=args.n_boot)
+    report(scored, min_exp=MIN_EXPECTANCY_R, alpha=ALPHA, n_boot=args.n_boot,
+           burn_in=args.burn_in)
 
     amb = log["notes"].str.contains("ambiguous_bar").sum()
     if amb:
