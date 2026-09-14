@@ -54,7 +54,9 @@ Data flow: `bars -> build_sessions -> run_all -> fills_to_log -> compute_r -> re
    one-timeframing — not the moment the run began in hindsight.
    `tests/test_levels.py::test_no_lookahead` mutates the tape after the cutoff
    and asserts nothing upstream changes. **If you touch classification, that
-   test must still pass.**
+   test must still pass.** Generators are held to the same standard by
+   `assert_signals_survive_truncation` in `test_signals.py`: every signal must
+   be reproducible, unchanged, from the tape cut at its own bar.
 2. **Missing data is `None`, never a plausible substitute.** SPY has no
    overnight session, so `on_high`/`on_range_pos` are `None` and `s5_gate()` is
    `False`. Do not "fix" this by using the 09:30 open, the prior close, or
@@ -78,6 +80,11 @@ Data flow: `bars -> build_sessions -> run_all -> fills_to_log -> compute_r -> re
 7. **The bootstrap resamples sessions, not trades.** Trades within a session
    share a regime and share the trader's state. Switching to an i.i.d. bootstrap
    tightens every interval by roughly a third and is wrong.
+8. **Gates are decided at fixed checkpoints, on the trades that existed then.**
+   `futility_verdict` evaluates n = 60 on the first 60 primary trades and
+   n = 150 on the first 150; a kill stays a kill. Burn-in (the first 30 trades
+   of each setup, by time) is removed before counting. Re-deciding on the whole
+   sample every time the report runs is an uncorrected sequential test.
 
 ## Changing parameters
 
@@ -100,7 +107,8 @@ A setup generator is complete when all of the following hold:
 - [ ] Every trigger condition from `docs/protocol.html` maps to a named key in
       `Signal.checklist`, and any condition the data cannot verify is `None`.
 - [ ] It emits nothing before its conditions are knowable in real time, with a
-      test proving it (mirror `test_s3_never_enters_before_confirmation`).
+      test proving it (mirror `test_s3_never_enters_before_confirmation`, and
+      run it through `assert_signals_survive_truncation`).
 - [ ] Stops respect the setup's floor and cap; structure beyond the cap means
       **no trade**, never a widened stop.
 - [ ] The generator returns `[]` when its day gate fails, with a test.
