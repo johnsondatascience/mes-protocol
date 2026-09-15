@@ -10,8 +10,11 @@ from datetime import date, time, timedelta
 import numpy as np
 import pandas as pd
 
-from mesproto.config import ET, GAP_OPEN_PCT, MES, S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, SPY
+from mesproto.config import (
+    ET, GAP_OPEN_PCT, MES, S1_NEWS_EVENTS, S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, SPY,
+)
 from mesproto.levels import build_sessions, load_dataframe_bars
+from mesproto.news import NewsCalendar
 from mesproto.schema import fills_to_log, validate
 from mesproto.signals import (
     Fill, Signal, generate_s1, generate_s3, run_all, simulate,
@@ -384,20 +387,34 @@ def test_s1_news_day_stands_down_before_1030():
     d = S1_LOOKAHEAD_DATE
     lv = {x.date: x for x in build_sessions(bars, tick=TICK)}[d]
 
-    on_news = generate_s1(bars, lv, MES, news_dates={d})
+    carried = tuple(S1_NEWS_EVENTS) + ("GDP",)
+
+    def calendar(days, start=d - timedelta(days=30), end=d + timedelta(days=30)):
+        return NewsCalendar(start=start, end=end, events=frozenset(carried),
+                            days={k: frozenset(v) for k, v in days.items()})
+
+    on_news = generate_s1(bars, lv, MES, news=calendar({d: {S1_NEWS_EVENTS[0]}}))
     assert all(s.signal_time.time() >= time(10, 30) for s in on_news), \
         [s.signal_time.time() for s in on_news]
 
-    quiet = generate_s1(bars, lv, MES, news_dates={date(2026, 3, 6)})
+    quiet = generate_s1(bars, lv, MES, news=calendar({date(2026, 3, 6): {"CPI"}}))
     assert quiet and quiet[0].checklist["no_news_stand_down"] is True
+
+    other = generate_s1(bars, lv, MES, news=calendar({d: {"GDP"}}))
+    assert other and other[0].checklist["no_news_stand_down"] is True, \
+        "a release outside the S1 list is not an S1 stand-down"
 
     unknown = generate_s1(bars, lv, MES)
     assert unknown[0].signal_time.time() < time(10, 30)
     assert unknown[0].checklist["no_news_stand_down"] is None, \
         "no calendar supplied: the stand-down could not be verified"
     assert unknown[0].checklist_ok is False
+
+    stale = generate_s1(bars, lv, MES, news=calendar({}, end=d - timedelta(days=1)))
+    assert stale and stale[0].checklist["no_news_stand_down"] is None, \
+        "a session past the calendar's coverage is unknown, not a quiet day"
     print(f"  news day: {len(on_news)} signals before 10:30 suppressed; "
-          f"no calendar -> None")
+          f"no calendar or uncovered session -> None")
 
 
 def test_s3_checklist_maps_every_protocol_condition():

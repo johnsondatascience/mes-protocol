@@ -40,6 +40,10 @@ only needed for the TBBO loader.
 ## Quick start
 
 ```bash
+# 0. build the news calendar (needs FRED_API_KEY in the environment or .env);
+#    re-run before each evaluation block — it covers through yesterday
+python scripts/fetch_news_calendar.py
+
 # 1. prototype on free SPY minute bars (no overnight session — S5 unavailable)
 python scripts/run_pipeline.py --csv data/spy_1min.csv --contract SPY
 
@@ -93,6 +97,26 @@ Nothing in `data/` is committed. Options, cheapest first:
 
 Always pull a single expiry. Back-adjusted continuous series shift historical
 prices by accumulated roll gaps, which corrupts every level this repo computes.
+
+### News calendar
+
+`scripts/fetch_news_calendar.py` writes `data/news_calendar.csv`, which S1's
+news stand-down reads. It needs a free FRED API key
+([fredaccount.stlouisfed.org/apikeys](https://fredaccount.stlouisfed.org/apikeys))
+in `FRED_API_KEY` or `.env`.
+
+- **CPI, NFP, PPI, retail sales** come from FRED release dates: the days each
+  release actually came out, shutdown delays included. FRED also lists about
+  one annual-revision day a year per release; those count as release days.
+- **FOMC** is the statement day of each *scheduled* meeting, from
+  federalreserve.gov. Unscheduled meetings, notation votes and cancelled
+  meetings are skipped — none could be planned around that morning.
+- The file declares its date range and event types. A session outside the
+  range is *unknown*, not quiet: its S1 signals before 10:30 get
+  `no_news_stand_down=None` and leave the primary sample. The fetch refuses to
+  write a calendar with a full year missing for any event, since that means a
+  source page changed.
+- Which events S1 watches is `S1_NEWS_EVENTS` in `config.py` (pre-registered).
 
 ## Verify the delta convention before trusting anything
 

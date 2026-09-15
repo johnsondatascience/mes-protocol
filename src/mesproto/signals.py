@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
-from typing import Collection, Literal, Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -44,12 +44,14 @@ import pandas as pd
 from .config import (
     ENTRY_MAX_WAIT_BARS, ET, MECHANICAL_TARGET_R, OTF_BAR_MINUTES, RTH_CLOSE,
     RTH_OPEN, S1_BREAK_WINDOW, S1_DELTA_CONFIRM_BARS,
-    S1_NEWS_STAND_DOWN_UNTIL, S1_RETEST_MAX_REENTRY_PTS, S1_STOP_BEYOND_SWING_PTS,
+    S1_NEWS_EVENTS, S1_NEWS_STAND_DOWN_UNTIL, S1_RETEST_MAX_REENTRY_PTS,
+    S1_STOP_BEYOND_SWING_PTS,
     S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, S3_ENTRY_CUTOFF, S3_MAX_COUNTER_DELTA_FRAC,
     S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS, S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS,
     S3_VWAP_TOLERANCE_PTS, Contract,
 )
 from .levels import SessionLevels, rth_slice, running_crosses
+from .news import NewsCalendar
 
 Direction = Literal["LONG", "SHORT"]
 EntryStyle = Literal["LIMIT", "STOP"]
@@ -142,7 +144,7 @@ def _clamp_stop(entry: float, raw_stop: float, sign: int,
 
 def generate_s1(
     bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
-    news_dates: Optional[Collection[date]] = None,
+    news: Optional[NewsCalendar] = None,
 ) -> list[Signal]:
     """Break of the IB between 10:00 and 11:30, entered on the retest.
 
@@ -155,10 +157,10 @@ def generate_s1(
     every close beyond the edge would log one idea as several correlated
     trades and overweight whichever sessions hovered there.
 
-    Stand-downs. On FOMC / CPI / NFP days nothing is emitted before
-    S1_NEWS_STAND_DOWN_UNTIL; `news_dates` is that calendar. Without one the
-    stand-down cannot be verified, so earlier signals carry
-    no_news_stand_down=None.
+    Stand-downs. On days carrying any release in S1_NEWS_EVENTS nothing is
+    emitted before S1_NEWS_STAND_DOWN_UNTIL; `news` is that calendar. Without
+    one — or on a session the calendar does not cover — the stand-down cannot
+    be verified, so earlier signals carry no_news_stand_down=None.
 
     A gap open beyond GAP_OPEN_PCT of the prior close is a different regime,
     but since the 2026-09-15 amendment it is not a checklist condition: the
@@ -178,7 +180,7 @@ def generate_s1(
 
     delta = _bar_delta(rth)
     cum = delta.cumsum() if delta is not None else None
-    news_day = None if news_dates is None else lv.date in news_dates
+    news_day = None if news is None else news.is_news_day(lv.date, S1_NEWS_EVENTS)
 
     state = "WAITING"
     direction: Optional[Direction] = None
@@ -546,8 +548,8 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
 
 def run_session(bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
                 s3_entry_style: EntryStyle = "LIMIT",
-                news_dates: Optional[Collection[date]] = None) -> list[Fill]:
-    signals = generate_s1(bars, lv, contract, news_dates=news_dates) + \
+                news: Optional[NewsCalendar] = None) -> list[Fill]:
+    signals = generate_s1(bars, lv, contract, news=news) + \
         generate_s3(bars, lv, contract, entry_style=s3_entry_style)
     signals.sort(key=lambda s: s.signal_time)
     return [simulate(s, bars, contract) for s in signals]
@@ -555,8 +557,8 @@ def run_session(bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
 
 def run_all(bars: pd.DataFrame, sessions: Sequence[SessionLevels],
             contract: Contract, s3_entry_style: EntryStyle = "LIMIT",
-            news_dates: Optional[Collection[date]] = None) -> list[Fill]:
+            news: Optional[NewsCalendar] = None) -> list[Fill]:
     fills: list[Fill] = []
     for lv in sessions:
-        fills.extend(run_session(bars, lv, contract, s3_entry_style, news_dates))
+        fills.extend(run_session(bars, lv, contract, s3_entry_style, news))
     return fills

@@ -303,30 +303,6 @@ def test_databento_symbology_guards_single_expiry():
     print("  single expiry ok; continuous warns; parent/spread/multi refused")
 
 
-def test_load_news_dates():
-    import os
-    import tempfile
-    from mesproto.levels import load_news_dates
-
-    fd, path = tempfile.mkstemp(suffix=".csv")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write("date,release\n2026-03-06,NFP\n\n# CPI\n2026-03-11 ,CPI\n")
-        assert load_news_dates(path) == {date(2026, 3, 6), date(2026, 3, 11)}
-
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("2026-03-06\nMarch 11\n")
-        try:
-            load_news_dates(path)
-        except ValueError as e:
-            assert ":2:" in str(e), e
-        else:
-            raise AssertionError("a malformed date must not be silently skipped")
-    finally:
-        os.remove(path)
-    print("  header/comments/blank skipped; malformed row raises")
-
-
 def test_spy_has_no_overnight():
     d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
     prior = make_session(d0, balance_path(500.0), overnight=False)

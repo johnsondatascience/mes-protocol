@@ -35,12 +35,15 @@ src/mesproto/
                 anywhere else — if you find one, move it here.
   levels.py     loaders (CSV / Databento TBBO) -> bars; volume profile and
                 value area; SessionLevels per RTH day; day-type classification.
+  news.py       scheduled-release calendar (FRED + federalreserve.gov): parsers,
+                the coverage-aware NewsCalendar, and the fetchers the script uses.
   signals.py    S1 and S3 generators; pessimistic fill simulation.
   schema.py     the canonical trade-log shape, shared by hand-logged replay
                 and generated signals; validation.
   evaluate.py   R computation, session-block bootstrap, futility gates. CLI.
 tests/          run directly (python tests/test_x.py) or with pytest.
 scripts/        run_pipeline.py — bars to evaluation in one command.
+                fetch_news_calendar.py — builds data/news_calendar.csv (network).
 docs/           protocol.html — the study design these tools serve.
 ```
 
@@ -60,7 +63,9 @@ Data flow: `bars -> build_sessions -> run_all -> fills_to_log -> compute_r -> re
 2. **Missing data is `None`, never a plausible substitute.** SPY has no
    overnight session, so `on_high`/`on_range_pos` are `None` and `s5_gate()` is
    `False`. Do not "fix" this by using the 09:30 open, the prior close, or
-   extended-hours equity bars.
+   extended-hours equity bars. The same holds for the news calendar: a
+   session outside its declared coverage, or an event type it does not carry,
+   is `None` — never a quiet day.
 3. **Fill conventions stay pessimistic.** Limit entries require trading
    *strictly through* the level. Stop entries pay a tick. When one bar contains
    both stop and target, the **stop** is assumed first and `ambiguous_bar` is

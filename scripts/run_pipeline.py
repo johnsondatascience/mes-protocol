@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mesproto import (  # noqa: E402
     CONTRACTS, build_sessions, fills_to_log, load_csv_bars,
-    load_databento_tbbo, load_news_dates, sessions_to_frame, validate,
+    load_databento_tbbo, load_news_calendar, sessions_to_frame, validate,
 )
 from mesproto.config import ALPHA, BURN_IN_TRADES, MIN_EXPECTANCY_R  # noqa: E402
 from mesproto.evaluate import compute_r, report  # noqa: E402
@@ -39,10 +39,10 @@ def main() -> int:
                     help="timezone the CSV timestamps are in")
     ap.add_argument("--s3-entry", default="LIMIT", choices=["LIMIT", "STOP"],
                     help="pre-registered S3 entry style; never change mid-sample")
-    ap.add_argument("--news-dates", metavar="PATH",
-                    help="FOMC/CPI/NFP dates, one YYYY-MM-DD per line. Without it, "
-                         "S1 signals before 10:30 cannot verify the stand-down and "
-                         "are flagged out of the primary sample")
+    ap.add_argument("--news-calendar", metavar="PATH", default="data/news_calendar.csv",
+                    help="built by scripts/fetch_news_calendar.py. S1 signals before "
+                         "10:30 on sessions it does not cover cannot verify the "
+                         "stand-down and are flagged out of the primary sample")
     ap.add_argument("--contracts", type=int, default=1)
     ap.add_argument("--burn-in", type=int, default=BURN_IN_TRADES,
                     help="burn-in trades per setup, flagged (not excluded), applied uniformly")
@@ -70,13 +70,21 @@ def main() -> int:
               f"S2 {sf['s2_gate'].mean():.0%}  S3 {sf['s3_gate'].mean():.0%}  "
               f"S5 {sf['s5_gate'].mean():.0%}")
 
-    news_dates = load_news_dates(args.news_dates) if args.news_dates else None
-    if news_dates is None:
-        print("\nwarn: no --news-dates calendar. S1 signals before 10:30 ET get "
-              "no_news_stand_down=None and are excluded from the primary analysis.")
+    news = None
+    if Path(args.news_calendar).is_file():
+        news = load_news_calendar(args.news_calendar)
+        print(f"\nnews calendar {news.start} .. {news.end}: {', '.join(sorted(news.events))}")
+        uncovered = sum(not news.start <= s.date <= news.end for s in sessions)
+        if uncovered:
+            print(f"warn: {uncovered} of {len(sessions)} sessions fall outside the news "
+                  f"calendar — re-run scripts/fetch_news_calendar.py. Their S1 signals "
+                  f"before 10:30 ET get no_news_stand_down=None.")
+    else:
+        print(f"\nwarn: no news calendar at {args.news_calendar} — run "
+              f"scripts/fetch_news_calendar.py. S1 signals before 10:30 ET get "
+              f"no_news_stand_down=None and are excluded from the primary analysis.")
 
-    fills = run_all(bars, sessions, contract, s3_entry_style=args.s3_entry,
-                    news_dates=news_dates)
+    fills = run_all(bars, sessions, contract, s3_entry_style=args.s3_entry, news=news)
     log = fills_to_log(fills, contract, contracts=args.contracts)
     if log.empty:
         print("\nno signals generated — check the gates above before assuming a bug")

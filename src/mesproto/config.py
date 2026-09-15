@@ -7,7 +7,7 @@ or a hardcoded time anywhere else, that is a bug — move it here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import time
+from datetime import date, time
 
 try:
     from zoneinfo import ZoneInfo
@@ -34,7 +34,7 @@ ENTRY_MAX_WAIT_BARS = 30         # a resting entry unfilled after this many bars
 
 # --- setup-specific windows ---------------------------------------------------
 S1_BREAK_WINDOW = (time(10, 0), time(11, 30))
-S1_NEWS_STAND_DOWN_UNTIL = time(10, 30)   # FOMC / CPI / NFP days
+S1_NEWS_STAND_DOWN_UNTIL = time(10, 30)   # on days carrying any of S1_NEWS_EVENTS
 S3_ENTRY_CUTOFF = time(15, 0)
 S4_NO_TRADE_OPEN = time(9, 35)   # first 5 minutes
 S4_NO_TRADE_CLOSE = time(15, 45)  # last 15 minutes
@@ -77,6 +77,27 @@ SPY = Contract(  # proxy for prototyping only — no overnight session
 )
 
 CONTRACTS = {c.symbol: c for c in (MES, ES, SPY)}
+
+# --- scheduled-release calendar ---------------------------------------------
+# The calendar may carry more event types than any rule watches. Which ones a
+# stand-down watches is pre-registered: changing S1_NEWS_EVENTS restarts S1.
+FOMC_EVENT = "FOMC"                       # statement day of a scheduled meeting
+NEWS_FRED_RELEASES = {                    # event -> FRED release_id
+    "CPI": 10,                            # Consumer Price Index (BLS)
+    "NFP": 50,                            # Employment Situation (BLS)
+    "PPI": 46,                            # Producer Price Index (BLS)
+    "RETAIL_SALES": 9,                    # Advance Monthly Sales for Retail and Food Services
+}
+S1_NEWS_EVENTS = (FOMC_EVENT, "CPI", "NFP")
+NEWS_CALENDAR_START = date(2015, 1, 1)    # default first day the fetch script covers
+NEWS_CALENDAR_LAG_DAYS = 1                # coverage ends this many days before the fetch:
+                                          # FRED lists a release only once its data loads
+FRED_RELEASE_DATES_URL = "https://api.stlouisfed.org/fred/release/dates"
+FRED_MAX_LIMIT = 10000
+FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+FOMC_HISTORICAL_URL = "https://www.federalreserve.gov/monetarypolicy/fomchistorical{year}.htm"
+HTTP_TIMEOUT_S = 30
+HTTP_USER_AGENT = "mesproto/0.1 (research; +https://github.com/johnsondatascience/mes-protocol)"
 
 # exits filled by a stop order pay slippage_ticks_stop: a breakeven exit is a
 # moved stop being hit, so it pays too. Market (MANUAL) exits are not charged.

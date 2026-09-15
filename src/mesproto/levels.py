@@ -107,28 +107,6 @@ def load_csv_bars(
     return _finalize(df, source)
 
 
-def load_news_dates(path: str) -> set[date]:
-    """Scheduled-release dates (FOMC, CPI, NFP) from a text or CSV file.
-
-    One YYYY-MM-DD per line, taken from the first comma-separated field;
-    blank lines, '#' comments and a non-date header are skipped. Which
-    releases count is the protocol's call — this only reads the list.
-    """
-    out: set[date] = set()
-    with open(path, encoding="utf-8") as fh:
-        for n, raw in enumerate(fh):
-            field = raw.split("#", 1)[0].split(",", 1)[0].strip()
-            if not field:
-                continue
-            try:
-                out.add(date.fromisoformat(field))
-            except ValueError:
-                if n == 0:
-                    continue          # header row
-                raise ValueError(f"{path}:{n + 1}: not a YYYY-MM-DD date: {field!r}")
-    return out
-
-
 def load_dataframe_bars(df: pd.DataFrame, source: SourceKind = "SPY") -> pd.DataFrame:
     """Wrap an already-loaded bar frame (e.g. from an Alpaca or Polygon client)."""
     return _finalize(df.copy(), source)
