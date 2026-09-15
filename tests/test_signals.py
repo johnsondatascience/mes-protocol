@@ -10,7 +10,7 @@ from datetime import date, time, timedelta
 import numpy as np
 import pandas as pd
 
-from mesproto.config import ET, GAP_OPEN_PCT, MES, S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS
+from mesproto.config import ET, GAP_OPEN_PCT, MES, S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, SPY
 from mesproto.levels import build_sessions, load_dataframe_bars
 from mesproto.schema import fills_to_log, validate
 from mesproto.signals import (
@@ -551,6 +551,18 @@ def test_log_failed_checks_and_notes():
     assert log["failed_checks"].tolist() == ["", "", "delta_confirmed=None"], \
         log["failed_checks"].tolist()
     print(f"  notes: {log['notes'].tolist()}  failed_checks: {log['failed_checks'].tolist()}")
+
+
+def test_generated_log_records_contract_and_mechanical_exit():
+    """A generated trade has no discretion, so its managed exit is the bracket;
+    and the contract it was scored for travels with the row."""
+    bars, lv, d1 = build_two_days(s1_path())
+    log = fills_to_log(run_all(bars, list(lv.values()), MES), SPY)
+    assert not log.empty
+    assert (log["contract"] == "SPY").all(), log["contract"].tolist()
+    assert (log["mech_exit_px"] == log["exit_px"]).all()
+    assert (log["mech_exit_reason"] == log["exit_reason"]).all()
+    print(f"  {len(log)} rows: contract=SPY, mech exit == exit")
 
 
 def test_pipeline_produces_valid_log():

@@ -128,7 +128,11 @@ pinned to the protocol's §06 table, decided only at fixed checkpoints).
 
 ## Evaluation rules the CLI enforces
 
-- R is net of the **execution contract's** costs (`--contract`, default MES).
+- R is computed from the **mechanical** exit (`mech_exit_px`, `mech_exit_reason`)
+  net of the costs of each row's `contract`. The exit actually taken
+  (`exit_px`) is scored as `managed_R` and reported beside it, never mixed in.
+- A mechanical TARGET must sit exactly 2R from entry and a mechanical STOP at
+  `stop_px`; anything else fails validation.
 - The first `BURN_IN_TRADES` (30) trades of each setup, by time, are burn-in —
   whatever their checklist. They are included and flagged `burn_in=True`, and
   each setup's result is also printed without them for comparison.

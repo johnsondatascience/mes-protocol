@@ -13,7 +13,7 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from mesproto.config import BURN_IN_TRADES, FUTILITY_GATES, MES, SPY
+from mesproto.config import BURN_IN_TRADES, FUTILITY_GATES, MES
 from mesproto.evaluate import (
     compute_r, futility_verdict, kill_threshold, primary_sample, report,
 )
@@ -23,15 +23,18 @@ from mesproto.schema import COLUMNS, validate
 def make_log(r_values, setup="VWAP_CONT", start=date(2026, 1, 5), per_session=2,
              checklist_ok=1, source="REPLAY"):
     """A trade log whose mechanical R (gross, before costs) is `r_values`,
-    in chronological order: LONG, entry 5000, 5-point stop."""
+    in chronological order: LONG MES, entry 5000, 5-point stop. +2R is a
+    TARGET, -1R a STOP, anything else a TIME exit; the managed exit matches."""
     rows = []
     for k, r in enumerate(r_values):
         d = start + timedelta(days=k // per_session)
+        reason = "TARGET" if r == 2.0 else "STOP" if r == -1.0 else "TIME"
         rows.append({
             "trade_id": k + 1, "session_date": d, "setup": setup, "direction": "LONG",
-            "entry_time": f"{10 + k % per_session:02d}:15:00",
-            "entry_px": 5000.0, "stop_px": 4995.0, "exit_px": 5000.0 + 5.0 * r,
-            "exit_reason": "TARGET" if r > 0 else "STOP", "contracts": 1,
+            "contract": "MES", "entry_time": f"{10 + k % per_session:02d}:15:00",
+            "entry_px": 5000.0, "stop_px": 4995.0,
+            "exit_px": 5000.0 + 5.0 * r, "exit_reason": reason,
+            "mech_exit_px": 5000.0 + 5.0 * r, "mech_exit_reason": reason, "contracts": 1,
             "day_type": "TREND_UP", "ib_range_pts": 20.0, "on_range_pos": 0.5,
             "checklist_ok": checklist_ok, "grade": "A", "source": source, "notes": "",
         })
@@ -42,19 +45,44 @@ def make_log(r_values, setup="VWAP_CONT", start=date(2026, 1, 5), per_session=2,
 
 # --- costs -------------------------------------------------------------------
 
-def test_compute_r_uses_the_contract_cost_model():
-    """A SPY trade must not be charged MES commission in MES points."""
-    log = make_log([2.0])
-    log[["entry_px", "stop_px", "exit_px"]] = [[500.0, 499.0, 502.0]]
-    spy = compute_r(log, contract=SPY)
-    assert abs(spy["R"].iloc[0] - 2.0) < 1e-12, spy["R"].iloc[0]   # SPY: no commission
-    assert abs(spy["pnl_usd"].iloc[0] - 2.0) < 1e-12, spy["pnl_usd"].iloc[0]
-
-    mes = compute_r(make_log([2.0]))                                 # default stays MES
+def test_compute_r_uses_each_rows_contract():
+    """A SPY trade must not be charged MES commission in MES points. Costs
+    come from the row's own contract column, not a command-line default."""
+    log = pd.concat([make_log([2.0]), make_log([2.0])], ignore_index=True)
+    log.loc[1, "trade_id"] = 2
+    log.loc[0, ["contract", "entry_px", "stop_px", "exit_px", "mech_exit_px"]] = \
+        ["SPY", 500.0, 499.0, 502.0, 502.0]
+    scored = compute_r(log)
+    spy, mes = scored.iloc[0], scored.iloc[1]
+    assert abs(spy["R"] - 2.0) < 1e-12, spy["R"]                     # SPY: no commission
+    assert abs(spy["pnl_usd"] - 2.0) < 1e-12, spy["pnl_usd"]
     expected = (10.0 - MES.commission_rt / MES.point_value) / 5.0
-    assert abs(mes["R"].iloc[0] - expected) < 1e-12, mes["R"].iloc[0]
-    print(f"  SPY R={spy['R'].iloc[0]:.3f} ${spy['pnl_usd'].iloc[0]:.2f}; "
-          f"MES R={mes['R'].iloc[0]:.3f}")
+    assert abs(mes["R"] - expected) < 1e-12, mes["R"]
+    print(f"  SPY R={spy['R']:.3f} ${spy['pnl_usd']:.2f}; MES R={mes['R']:.3f}")
+
+
+def test_statistics_run_on_the_mechanical_exit():
+    """§03: the fixed 1:2 outcome is what the statistics run on; the managed
+    exit measures discretion and is kept apart."""
+    log = make_log([2.0])
+    log.loc[0, ["exit_px", "exit_reason"]] = [5002.5, "MANUAL"]     # took +0.5R by hand
+    scored = compute_r(log)
+    comm = MES.commission_rt / MES.point_value
+    assert abs(scored["R"].iloc[0] - (10.0 - comm) / 5.0) < 1e-12, scored["R"].iloc[0]
+    assert abs(scored["managed_R"].iloc[0] - (2.5 - comm) / 5.0) < 1e-12, \
+        scored["managed_R"].iloc[0]
+    print(f"  mechanical {scored['R'].iloc[0]:+.3f}R, managed {scored['managed_R'].iloc[0]:+.3f}R")
+
+
+def test_breakeven_exit_pays_stop_slippage():
+    """A breakeven exit is a moved stop being hit — a stop order, so it pays
+    the stop's slippage like any other."""
+    log = make_log([2.0])
+    log.loc[0, ["exit_px", "exit_reason"]] = [5000.0, "BREAKEVEN"]
+    managed = compute_r(log)["managed_R"].iloc[0]
+    expected = (-MES.slippage_ticks_stop * MES.tick - MES.commission_rt / MES.point_value) / 5.0
+    assert abs(managed - expected) < 1e-12, managed
+    print(f"  breakeven exit: {managed:+.3f}R")
 
 
 def test_compute_r_is_net_of_stop_slippage():
@@ -157,6 +185,25 @@ def test_validate_rejects_bad_direction_and_flags():
     print(f"  errors: {res.errors}")
 
 
+def test_validate_checks_mechanical_exit_against_the_bracket():
+    """A 1:2 bracket can only exit at the stop, at 2R, or on time. A logged
+    mechanical TARGET anywhere but 2R is a typo that would inflate R."""
+    log = make_log([2.0, -1.0, 0.3])
+    assert validate(log).ok, validate(log).errors
+    cases = {
+        "mech_exit_px": ("mech_exit_px", 5011.0, 0),        # TARGET not at 2R
+        "stop": ("mech_exit_px", 4994.0, 1),                # STOP not at stop_px
+        "mech_exit_reason": ("mech_exit_reason", "MANUAL", 2),
+        "contract": ("contract", "MNQ", 0),
+    }
+    for needle, (col, value, row) in cases.items():
+        bad = log.copy()
+        bad.loc[row, col] = value
+        res = validate(bad)
+        assert not res.ok and any(needle in e for e in res.errors), (col, res.errors)
+    print("  TARGET off 2R, STOP off stop_px, MANUAL mech reason, unknown contract: rejected")
+
+
 def test_validate_rejects_stop_on_wrong_side():
     log = make_log([1.0])
     log.loc[0, "stop_px"] = 5005.0             # a LONG with its stop above entry
@@ -194,6 +241,17 @@ def test_report_shows_gap_open_sessions_separately():
     assert "n=20 " in out, "gap-open trades stay in the primary sample"
     line = next((ln for ln in out.splitlines() if "gap-open" in ln and "n=" in ln), None)
     assert line is not None and "n=6 " in line, out
+    print(f" {line}")
+
+
+def test_report_shows_managed_exits_separately():
+    log = make_log([2.0, -1.0] * 5)
+    log.loc[log["exit_reason"] == "TARGET", ["exit_px", "exit_reason"]] = [5005.0, "MANUAL"]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report(compute_r(log), min_exp=0.15, alpha=0.01, n_boot=200)
+    line = next((ln for ln in buf.getvalue().splitlines() if "managed" in ln), None)
+    assert line is not None and "mechanical" in line, buf.getvalue()
     print(f" {line}")
 
 

@@ -78,6 +78,10 @@ SPY = Contract(  # proxy for prototyping only — no overnight session
 
 CONTRACTS = {c.symbol: c for c in (MES, ES, SPY)}
 
+# exits filled by a stop order pay slippage_ticks_stop: a breakeven exit is a
+# moved stop being hit, so it pays too. Market (MANUAL) exits are not charged.
+STOP_ORDER_EXITS = ("STOP", "BREAKEVEN")
+
 # --- statistical protocol -----------------------------------------------------
 MIN_EXPECTANCY_R = 0.15   # below this, not worth trading after costs
 N_SETUPS_TESTED = 5       # Bonferroni denominator
@@ -116,3 +120,4 @@ S3_STOP_FLOOR_PTS = 5.0
 S3_STOP_CAP_PTS = 10.0
 
 MECHANICAL_TARGET_R = 2.0
+PRICE_EPS = 1e-6          # float tolerance when a logged price must equal a computed one

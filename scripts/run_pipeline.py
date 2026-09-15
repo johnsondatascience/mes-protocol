@@ -91,7 +91,7 @@ def main() -> int:
     log.to_csv(args.out, index=False)
     print(f"\nwrote {len(log)} trades -> {args.out}")
 
-    scored = compute_r(log, contract=contract)
+    scored = compute_r(log)
     scored["session_date"] = scored["session_date"].astype("datetime64[ns]")
     report(scored, min_exp=MIN_EXPECTANCY_R, alpha=ALPHA, n_boot=args.n_boot,
            burn_in=args.burn_in)

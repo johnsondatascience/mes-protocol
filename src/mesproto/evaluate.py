@@ -18,31 +18,39 @@ protocol amendment 2026-09-15.
 
 Usage:
     python -m mesproto.evaluate trades.csv
-    python -m mesproto.evaluate trades.csv --contract MES --min-expectancy 0.15 --alpha 0.01
+    python -m mesproto.evaluate trades.csv --min-expectancy 0.15 --alpha 0.01
 
 SCHEMA (CSV columns, all required unless noted):
-    trade_id        int
-    session_date    YYYY-MM-DD          (replay session date, NOT calendar date)
-    setup           str                 one of: IB_BREAK, LEVEL2LEVEL, VWAP_CONT,
+    trade_id          int
+    session_date      YYYY-MM-DD        (replay session date, NOT calendar date)
+    setup             str               one of: IB_BREAK, LEVEL2LEVEL, VWAP_CONT,
                                         ABSORPTION, ON_INVENTORY, IB_FAIL
-    direction       LONG|SHORT
-    entry_time      HH:MM:SS ET         (orders trades within a session)
-    entry_px        float
-    stop_px         float               initial stop, as bracketed at entry
-    exit_px         float               the MECHANICAL exit (see protocol §03)
-    exit_reason     TARGET|STOP|TIME|MANUAL|BREAKEVEN
-    contracts       int
-    day_type        TREND_UP|TREND_DOWN|BALANCE|DOUBLE_DIST|UNCLASSIFIED
-    ib_range_pts    float               initial balance range, 09:30-10:00 ET
-    on_range_pos    float 0-1           S5 covariate
-    checklist_ok    0|1                 all pre-registered conditions met?
-    grade           A|B|C               your execution grade (not setup quality)
-    source          str, optional       e.g. REPLAY, GENERATED
-    notes           str, optional
+    direction         LONG|SHORT
+    contract          MES|ES|SPY        execution vehicle; its costs score the row
+    entry_time        HH:MM:SS ET       (orders trades within a session)
+    entry_px          float
+    stop_px           float             initial stop, as bracketed at entry
+    exit_px           float             the exit you actually took (managed)
+    exit_reason       TARGET|STOP|TIME|MANUAL|BREAKEVEN
+    mech_exit_px      float             the fixed 1:2 bracket's exit (protocol §03):
+                                        stop_px, entry +/- 2R, or the time-exit price
+    mech_exit_reason  TARGET|STOP|TIME
+    contracts         int
+    day_type          TREND_UP|TREND_DOWN|BALANCE|DOUBLE_DIST|UNCLASSIFIED
+    ib_range_pts      float             initial balance range, 09:30-10:00 ET
+    on_range_pos      float 0-1         S5 covariate
+    gap_pct           float, optional   open vs prior close; gap-open sessions reported
+    checklist_ok      0|1               all pre-registered conditions met?
+    failed_checks     str, optional     conditions that were not True, ';'-separated
+    grade             A|B|C             your execution grade (not setup quality)
+    source            str, optional     e.g. REPLAY, GENERATED
+    notes             str, optional
 
-R is computed from the log, not entered by hand:
-    risk_pts = |entry_px - stop_px|
-    R = (exit_px - entry_px) * sign / risk_pts   minus modeled costs
+R is computed from the log, never entered by hand:
+    risk_pts  = |entry_px - stop_px|
+    R         = (mech_exit_px - entry_px) * sign / risk_pts   minus modeled costs
+              — the protocol's mech_exit_R; every statistic runs on it
+    managed_R = the same for exit_px, reported beside it
 """
 
 from __future__ import annotations
@@ -60,13 +68,14 @@ from .config import (
     ALPHA, BOOTSTRAP_CI, BURN_IN_TRADES, CONFIRM_N_MIN_EFFECT_R,
     CONFIRM_N_MIN_SIGMA_R, CONFIRM_POWER, CONTRACTS, DAY_TYPE_MIN_TRADES,
     FUTILITY_GATES, GAP_OPEN_PCT, GATE_CONFIDENCE,
-    GATE_SIGMA_FLOOR_R, MES, MIN_EXPECTANCY_R, Contract,
+    GATE_SIGMA_FLOOR_R, MIN_EXPECTANCY_R, PRICE_EPS, STOP_ORDER_EXITS,
 )
 from .schema import validate
 
 REQUIRED = [
-    "trade_id", "session_date", "setup", "direction", "entry_px", "stop_px",
-    "exit_px", "exit_reason", "contracts", "day_type", "checklist_ok",
+    "trade_id", "session_date", "setup", "direction", "contract", "entry_px",
+    "stop_px", "exit_px", "exit_reason", "mech_exit_px", "mech_exit_reason",
+    "contracts", "day_type", "checklist_ok",
 ]
 
 
@@ -79,33 +88,44 @@ def load(path):
     return df
 
 
-def compute_r(df, contract: Contract = MES):
-    """R-multiple net of the contract's modeled commission and slippage.
+def compute_r(df: pd.DataFrame) -> pd.DataFrame:
+    """R-multiples net of each row's contract costs (commission and slippage).
 
-    `contract` is the execution vehicle, not the chart the setup was read
-    on: trades read on ES and executed in MES are scored with MES costs.
+    The `contract` column is the execution vehicle, not the chart the setup
+    was read on: trades read on ES and executed in MES are scored with MES
+    costs. Adds:
+      R, gross_R, pnl_usd   the mechanical exit (protocol's mech_exit_R) —
+                            what every statistic runs on
+      managed_R             the exit actually taken, which measures discretion
     """
+    unknown = set(df["contract"].astype(str)) - set(CONTRACTS)
+    if unknown:
+        raise ValueError(f"unknown contract values {sorted(unknown)} — fix the log")
+    spec = df["contract"].astype(str).map(CONTRACTS)
+    tick = spec.map(lambda c: c.tick)
+    point_value = spec.map(lambda c: c.point_value)
+    commission_pts = spec.map(lambda c: c.commission_rt) / point_value
+    entry_slip = spec.map(lambda c: c.slippage_ticks_entry) * tick
+    stop_slip = spec.map(lambda c: c.slippage_ticks_stop) * tick
+
     sign = np.where(df["direction"].str.upper() == "LONG", 1.0, -1.0)
     risk_pts = (df["entry_px"] - df["stop_px"]).abs()
     if (risk_pts <= 0).any():
         raise ValueError("found trades with zero/negative risk distance — fix the log")
 
-    gross_pts = (df["exit_px"] - df["entry_px"]) * sign
+    def net_points(exit_px: pd.Series, reason: pd.Series) -> pd.Series:
+        slip = np.where(reason.astype(str).str.upper().isin(STOP_ORDER_EXITS), stop_slip, 0.0)
+        return (exit_px - df["entry_px"]) * sign - slip - entry_slip - commission_pts
 
-    # cost model, in index points per contract
-    slip = np.where(df["exit_reason"].str.upper() == "STOP",
-                    contract.slippage_ticks_stop * contract.tick, 0.0)
-    slip = slip + contract.slippage_ticks_entry * contract.tick
-    commission_pts = contract.commission_rt / contract.point_value
-
-    net_pts = gross_pts - slip - commission_pts
-    df = df.copy()
-    df["risk_pts"] = risk_pts
-    df["risk_usd"] = risk_pts * contract.point_value * df["contracts"]
-    df["gross_R"] = gross_pts / risk_pts
-    df["R"] = net_pts / risk_pts
-    df["pnl_usd"] = net_pts * contract.point_value * df["contracts"]
-    return df
+    mech_net = net_points(df["mech_exit_px"], df["mech_exit_reason"])
+    out = df.copy()
+    out["risk_pts"] = risk_pts
+    out["risk_usd"] = risk_pts * point_value * df["contracts"]
+    out["gross_R"] = (df["mech_exit_px"] - df["entry_px"]) * sign / risk_pts
+    out["R"] = mech_net / risk_pts
+    out["pnl_usd"] = mech_net * point_value * df["contracts"]
+    out["managed_R"] = net_points(df["exit_px"], df["exit_reason"]) / risk_pts
+    return out
 
 
 def chronological(df: pd.DataFrame) -> pd.DataFrame:
@@ -280,6 +300,9 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
                 print(f"  gap-open sessions (|gap| > {GAP_OPEN_PCT:.0%}): n={len(gap)} "
                       f"win={(gap['R'] > 0).mean():.0%} mean={gap['R'].mean():+.3f}R  "
                       f"(included; a different regime)")
+        if "managed_R" in g.columns and ((g["managed_R"] - g["R"]).abs() > PRICE_EPS).any():
+            print(f"  managed exits (your discretion, not the test): "
+                  f"mean={g['managed_R'].mean():+.3f}R vs mechanical {mean_r:+.3f}R")
         print(f"  sd={sigma:.3f}R  worst={g['R'].min():+.2f}R  best={g['R'].max():+.2f}R")
         print(f"  net P&L=${g['pnl_usd'].sum():,.0f}  "
               f"avg risk=${g['risk_usd'].mean():,.0f}/trade")
@@ -300,8 +323,8 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
                     print(f"    {dt:<14} n={len(gg):>4}  mean={gg['R'].mean():+.3f}R  "
                           f"win={((gg['R']>0).mean()):.0%}")
 
-        # exit reason mix — a fast read on whether targets are reachable
-        mix = g["exit_reason"].value_counts(normalize=True)
+        # mechanical exit mix — a fast read on whether targets are reachable
+        mix = g["mech_exit_reason"].value_counts(normalize=True)
         print("  exits: " + "  ".join(f"{k}={v:.0%}" for k, v in mix.items()))
 
         if "notes" in g.columns:
@@ -335,8 +358,6 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv")
-    ap.add_argument("--contract", default=MES.symbol, choices=sorted(CONTRACTS),
-                    help="execution vehicle whose cost model scores the log (default MES)")
     ap.add_argument("--min-expectancy", type=float, default=MIN_EXPECTANCY_R,
                     help=f"minimum expectancy in R worth trading (default {MIN_EXPECTANCY_R})")
     ap.add_argument("--alpha", type=float, default=ALPHA,
@@ -352,7 +373,7 @@ def main():
         print(f"warn: {w}")
     if not res.ok:
         sys.exit("trade log failed validation:\n  - " + "\n  - ".join(res.errors))
-    df = compute_r(df, contract=CONTRACTS[args.contract])
+    df = compute_r(df)
     report(df, args.min_expectancy, args.alpha, args.n_boot, burn_in=args.burn_in)
 
 

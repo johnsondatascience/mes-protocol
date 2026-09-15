@@ -327,14 +327,17 @@
         <tr><td class="mono-c">session_date</td><td>date</td><td>Bootstrap blocking unit — trades within a session are correlated</td></tr>
         <tr><td class="mono-c">setup</td><td>enum</td><td>IB_BREAK · LEVEL2LEVEL · VWAP_CONT · ABSORPTION · ON_INVENTORY</td></tr>
         <tr><td class="mono-c">direction</td><td>LONG/SHORT</td><td>Checks for a directional bias in your reads</td></tr>
+        <tr><td class="mono-c">contract</td><td>MES/ES/SPY</td><td>Execution vehicle; its commission and slippage score the trade</td></tr>
         <tr><td class="mono-c">entry_time</td><td>HH:MM:SS ET</td><td>Time-of-day conditioning</td></tr>
         <tr><td class="mono-c">entry_px, stop_px</td><td>float</td><td>Defines R. Stop is the bracket as placed, never as later moved</td></tr>
-        <tr><td class="mono-c">exit_px, exit_reason</td><td>float, enum</td><td>TARGET · STOP · TIME · MANUAL · BREAKEVEN</td></tr>
-        <tr><td class="mono-c">mech_exit_R</td><td>float</td><td>The fixed 1:2 outcome, logged for every trade</td></tr>
+        <tr><td class="mono-c">exit_px, exit_reason</td><td>float, enum</td><td>The exit you actually took. TARGET · STOP · TIME · MANUAL · BREAKEVEN</td></tr>
+        <tr><td class="mono-c">mech_exit_px, mech_exit_reason</td><td>float, enum</td><td>The fixed 1:2 outcome, logged for every trade: the stop, exactly 2R, or the time-exit price. TARGET · STOP · TIME. <code>mech_exit_R</code> is computed from these, never typed</td></tr>
         <tr class="hi"><td class="mono-c">day_type</td><td>enum</td><td>TREND_UP · TREND_DOWN · BALANCE · DOUBLE_DIST — classified at 11:00 ET, never at the close</td></tr>
         <tr><td class="mono-c">ib_range_pts</td><td>float</td><td>Regime covariate; also the S1 filter</td></tr>
         <tr><td class="mono-c">on_range_pos</td><td>0–1</td><td>Where 09:30 sat in the overnight range — the S5 covariate</td></tr>
+        <tr><td class="mono-c">gap_pct</td><td>float</td><td>Open vs prior close. Gap-open sessions (beyond 1%) are reported on their own line</td></tr>
         <tr class="hi"><td class="mono-c">checklist_ok</td><td>0/1</td><td>Did every pre-registered condition hold? Zeros are excluded from the primary analysis: they measure discipline, not the setup</td></tr>
+        <tr><td class="mono-c">failed_checks</td><td>str</td><td>Optional. Which conditions did not hold, so exclusions can be counted by reason</td></tr>
         <tr><td class="mono-c">grade</td><td>A/B/C</td><td>Your execution quality, separate from the setup's quality</td></tr>
         <tr><td class="mono-c">notes</td><td>str</td><td>One line. Screenshot filename if you keep them</td></tr>
       </tbody>
@@ -519,6 +522,7 @@ python mes_replay_eval.py trades.csv --min-expectancy 0.15 --alpha 0.01
       <tbody>
         <tr><td class="mono-c">2026-09-15</td><td>Burn-in trades (the first 30 of each setup) are included in the primary analysis and flagged, not excluded. The report also shows each setup without them. Gate checkpoints count burn-in trades, so n = 60 arrives 30 trades sooner.</td><td>All setups — none collected yet</td></tr>
         <tr><td class="mono-c">2026-09-15</td><td>S1 sessions that open more than 1% away from the prior close are no longer excluded. The trades are kept, the gap is logged in <code>gap_pct</code>, and the report shows gap-open sessions on their own line.</td><td>S1 — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>Trade log records the mechanical exit as a price and reason (<code>mech_exit_px</code>, <code>mech_exit_reason</code>) instead of a typed <code>mech_exit_R</code>, which is now computed. Adds <code>contract</code>, <code>gap_pct</code> and <code>failed_checks</code>. A logging change, not a rule change.</td><td>None</td></tr>
       </tbody>
     </table>
   </div>
