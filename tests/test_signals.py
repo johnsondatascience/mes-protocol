@@ -521,6 +521,54 @@ def _sessions(bars):
     return {x.date: x for x in build_sessions(bars, tick=TICK)}
 
 
+def _ib_day(after_ib, deltas_after=None):
+    """IB 4989.5-5010.5 (09:30-10:00), then `after_ib` closes from 10:00.
+    Cumulative delta climbs +100/bar through the IB; `deltas_after` sets the
+    bar deltas from 10:00 on (default -20)."""
+    d0, d1 = date(2026, 3, 2), S1_LOOKAHEAD_DATE
+    ib = np.concatenate([np.linspace(5000, 5010, 8), np.linspace(5010, 4990, 15),
+                         np.linspace(4990, 5002, 7)])
+    path = np.concatenate([ib, after_ib])
+    path = np.concatenate([path, np.full(390 - len(path), path[-1])])
+    day = bars_from_path(d1, path, overnight_center=5000.0)
+    rth = (day.index.date == d1) & (day.index.time >= time(9, 30))
+    deltas = np.full(390, -20.0)
+    deltas[:30] = 100.0
+    if deltas_after is not None:
+        deltas[30:30 + len(deltas_after)] = deltas_after
+    vol = day.loc[rth, "volume"].to_numpy()
+    day.loc[rth, "buy_volume"] = (vol + deltas) / 2
+    day.loc[rth, "sell_volume"] = (vol - deltas) / 2
+    return load_dataframe_bars(pd.concat([prior_balance_day(d0), day]).sort_index(),
+                               source="FUTURES")
+
+
+def test_s1_one_trade_per_ib_edge_per_session():
+    """Amended 2026-09-15: price wobbling back across the IB high makes a new
+    crossing, but the edge has had its S1 trade. On real August 2026 tape the
+    old rule sold one edge six times in an hour, several positions at once."""
+    after = [5012.0, 5011.0, 5011.0, 5009.5,        # break, retest (signal), dip back inside
+             5012.0, 5011.0, 5011.0]                 # re-break and a second clean retest
+    deltas = [500.0, -50.0, -50.0, -50.0, 800.0, -50.0, -50.0]
+    bars = _ib_day(np.concatenate([after, np.linspace(5011, 5040, 30)]), deltas)
+    lv = _sessions(bars)[S1_LOOKAHEAD_DATE]
+    sigs = generate_s1(bars, lv, MES)
+    assert len(sigs) == 1 and sigs[0].signal_time.time() == time(10, 1), \
+        [(s.signal_time.time(), s.context["break_time"]) for s in sigs]
+    print("  break at 10:00 and re-break at 10:04 on the same edge -> one S1 signal (10:01)")
+
+
+def test_ib_fail_one_per_ib_edge_per_session():
+    after = [5012.0, 5007.5,                         # break, fails 3 points back inside
+             5012.0, 5007.5]                         # re-break, fails again
+    bars = _ib_day(np.concatenate([after, np.linspace(5007, 4985, 30)]))
+    lv = _sessions(bars)[S1_LOOKAHEAD_DATE]
+    fails = generate_ib_fail(bars, lv, MES)
+    assert len(fails) == 1 and fails[0].signal_time.time() == time(10, 1), \
+        [f.signal_time.time() for f in fails]
+    print("  two failed breaks of the IB high -> one IB_FAIL (10:01)")
+
+
 def test_ib_fail_enters_when_the_retest_fails():
     """Entry: stop order 1 tick beyond the failure bar's far end. Stop: 1 point
     beyond the false break's extreme. Floor 4, cap 8."""

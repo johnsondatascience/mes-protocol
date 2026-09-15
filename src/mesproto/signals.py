@@ -259,7 +259,14 @@ def _ib_break_signals(
     break_i = -1
     retest_extreme = np.nan   # swing an S1 stop goes beyond (pullback side)
     break_extreme = np.nan    # furthest the break reached (an IB_FAIL stop's anchor)
-    s1_blocked = False        # S1's structure exceeded its cap on this break
+    s1_blocked = False        # S1 cannot trade this break (cap exceeded, or edge used)
+    # One S1 order and one IB_FAIL order per IB edge per session (amended
+    # 2026-09-15), keyed by break direction: LONG = the IB high, SHORT = the
+    # IB low. Price wobbling across an edge makes new crossings, but they are
+    # the same idea; on August 2026 ES the old rule sold one edge six times in
+    # an hour. The first order placed uses the edge, filled or not.
+    s1_used: set[str] = set()
+    fail_used: set[str] = set()
 
     for i, (ts, bar) in enumerate(win.iterrows()):
         if state == "WAITING":
@@ -273,7 +280,7 @@ def _ib_break_signals(
                 # a long break, the pullback high on a short one.
                 retest_extreme = bar["low"] if direction == "LONG" else bar["high"]
                 break_extreme = bar["high"] if direction == "LONG" else bar["low"]
-                s1_blocked = False
+                s1_blocked = direction in s1_used
             continue
 
         sign = 1 if direction == "LONG" else -1
@@ -290,7 +297,7 @@ def _ib_break_signals(
         reentry = (edge - bar["close"]) if direction == "LONG" else (bar["close"] - edge)
         if reentry > reentry_tol:
             fail_news = news_status(ts)
-            if fail_news is not False:
+            if fail_news is not False and direction not in fail_used:
                 fail_sign = -sign
                 entry = float(bar["low"] - contract.tick) if fail_sign < 0 \
                     else float(bar["high"] + contract.tick)
@@ -311,6 +318,7 @@ def _ib_break_signals(
                         },
                         context=context(break_i, failed_break_extreme=float(break_extreme)),
                     ))
+                    fail_used.add(direction)
             state, direction = "WAITING", None
             continue
 
@@ -365,6 +373,7 @@ def _ib_break_signals(
             },
             context=context(break_i),
         ))
+        s1_used.add(direction)
         state, direction = "WAITING", None   # one signal per break sequence
     return out
 
