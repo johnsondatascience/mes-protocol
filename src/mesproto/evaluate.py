@@ -359,7 +359,8 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
     tested = primary[~primary["setup"].isin(EXPLORATORY_SETUPS)]
     if tested.empty:
         print("PORTFOLIO: no trades from tested setups in the primary sample. Nothing to evaluate.")
-        print("Expected when no trade passed its checklist, or when the data source")
+        print("Expected when every trade fell in a validation-only period (named above),")
+        print("when no trade passed its checklist, or when the data source")
         print("cannot verify a condition — bar-only data leaves delta_confirmed=None,")
         print("which is recorded as a failed checklist rather than silently passed.")
         print("=" * 78 + "\n")
