@@ -83,8 +83,10 @@ Data flow: `bars -> build_sessions -> run_all -> fills_to_log -> compute_r -> re
 8. **Gates are decided at fixed checkpoints, on the trades that existed then.**
    `futility_verdict` evaluates n = 60 on the first 60 primary trades and
    n = 150 on the first 150; a kill stays a kill. Burn-in (the first 30 trades
-   of each setup, by time) is removed before counting. Re-deciding on the whole
-   sample every time the report runs is an uncorrected sequential test.
+   of each setup, by time) counts toward those checkpoints: since the
+   2026-09-15 amendment it is flagged `burn_in=True`, not removed. Re-deciding
+   on the whole sample every time the report runs is an uncorrected
+   sequential test.
 
 ## Changing parameters
 
@@ -137,7 +139,7 @@ files. Keep it that way; a test suite that needs market data stops being run.
 | "Assume target hits first on ambiguous bars" | Manufactures edge | Report the ambiguous share; if it is large, the answer is replay |
 | "Backtest S4 from bars" | Absorption is not visible in OHLCV | Databento MBP-10, or keep it in manual replay |
 | "Use a continuous contract for more history" | Corrupts every level | Per-expiry data with explicit roll handling |
-| "Drop the losing trades before the cutoff, they were learning" | Post-hoc exclusion | The pre-registered 30-trade burn-in, applied uniformly |
+| "Drop the losing trades before the cutoff, they were learning" | Post-hoc exclusion | The 30-trade burn-in flag, applied uniformly, and the report's "without burn-in" comparison line |
 | "Add live order routing" | Out of scope, and unreviewed | Nothing — this repo does not trade |
 
 ## Style

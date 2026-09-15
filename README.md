@@ -129,9 +129,10 @@ pinned to the protocol's §06 table, decided only at fixed checkpoints).
 ## Evaluation rules the CLI enforces
 
 - R is net of the **execution contract's** costs (`--contract`, default MES).
-- The first `BURN_IN_TRADES` (30) trades of each setup, by time, are burn-in and
-  excluded — whatever their checklist.
-- `checklist_ok=0` trades are excluded after burn-in.
+- The first `BURN_IN_TRADES` (30) trades of each setup, by time, are burn-in —
+  whatever their checklist. They are included and flagged `burn_in=True`, and
+  each setup's result is also printed without them for comparison.
+- `checklist_ok=0` trades are excluded.
 - The futility gate is decided at n = 60 and n = 150 on the trades that existed
   at that checkpoint. A kill at 60 stays a kill.
 - Logs are validated first: unknown direction/setup/grade, checklist flags other

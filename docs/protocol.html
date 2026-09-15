@@ -311,7 +311,7 @@
     <li><span class="h">Replay at 1× to 2×, and place real orders through the DOM.</span><p>Speed suppresses the hesitation that costs you fills live. Use bracket orders with the same defaults you would use with money on.</p></li>
     <li><span class="h">One decision per bar, no re-runs.</span><p>If you pause to think, the bar is over. Rewinding to re-take a trade invalidates the session for the entire study, not just that trade.</p></li>
     <li><span class="h">Log a mechanical exit alongside your managed exit.</span><p>Record the fixed 1:2 outcome for <em>every</em> trade regardless of how you actually managed it. The mechanical series is what the statistics run on; the managed series measures your discretion, and mixing them makes both unreadable.</p></li>
-    <li><span class="h">Mark the first 30 trades of each setup as burn-in.</span><p>Your reading skill is non-stationary across a six-month study — the early trades and late trades are not draws from the same distribution. Pre-register the burn-in exclusion now so it isn't a post-hoc convenience later.</p></li>
+    <li><span class="h">Mark the first 30 trades of each setup as burn-in.</span><p>Your reading skill is non-stationary across a six-month study — the early trades and late trades are not draws from the same distribution. Burn-in trades stay in the primary analysis, flagged, and the result is also reported without them so the drift is visible (amended — see §09).</p></li>
   </ol>
 </section>
 
@@ -507,6 +507,20 @@ python mes_replay_eval.py trades.csv --min-expectancy 0.15 --alpha 0.01
 <span class="c">#   breakdown by day type and by exit reason</span>
 <span class="c">#   portfolio view: daily P&amp;L distribution and max drawdown</span></pre>
   <p>Run it on a fixed cadence — every 20 sessions, say — not whenever a stretch feels good or bad. Checking the numbers after a losing week and again after a winning one is an informal sequential test with no correction, and it will find whatever you are hoping for.</p>
+</section>
+
+<section>
+  <h2><span class="num">09</span>Amendments</h2>
+  <p class="sub">Changes to the rules above, dated, made before the affected samples were collected. The original wording is in the repository history.</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Date</th><th>Change</th><th>Samples restarted</th></tr></thead>
+      <tbody>
+        <tr><td class="mono-c">2026-09-15</td><td>Burn-in trades (the first 30 of each setup) are included in the primary analysis and flagged, not excluded. The report also shows each setup without them. Gate checkpoints count burn-in trades, so n = 60 arrives 30 trades sooner.</td><td>All setups — none collected yet</td></tr>
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <footer>

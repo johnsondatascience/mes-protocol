@@ -12,9 +12,9 @@ reports:
     only at the pre-registered checkpoints
   - day-type conditional breakdown, exit mix, ambiguous-bar share
 
-The primary sample excludes, per setup, the pre-registered burn-in (the
-chronologically first BURN_IN_TRADES trades) and then every checklist_ok=0
-trade.
+The primary sample excludes every checklist_ok=0 trade. Burn-in (per setup,
+the chronologically first BURN_IN_TRADES trades) is included and flagged —
+protocol amendment 2026-09-15.
 
 Usage:
     python -m mesproto.evaluate trades.csv
@@ -117,20 +117,23 @@ def chronological(df: pd.DataFrame) -> pd.DataFrame:
 
 def primary_sample(df: pd.DataFrame, burn_in: int = BURN_IN_TRADES
                    ) -> tuple[pd.DataFrame, dict]:
-    """The primary-analysis sample, in chronological order, plus exclusion counts.
+    """The primary-analysis sample, in chronological order, plus counts.
 
     Burn-in is the first `burn_in` trades of each setup by time, counted
     whatever their checklist: reading skill drifts with every trade taken, so
-    an off-checklist trade uses up burn-in like any other. After burn-in,
-    checklist_ok=0 trades are excluded — they measure discipline (or, for
-    generated trades, a condition the data could not verify), not the setup.
+    an off-checklist trade uses up burn-in like any other. Burn-in trades stay
+    in the sample with burn_in=True (protocol amendment 2026-09-15), so the
+    drift the protocol worries about is shown beside the result rather than
+    removed from it. checklist_ok=0 trades are excluded — they measure
+    discipline (or, for generated trades, a condition the data could not
+    verify), not the setup.
     """
-    ordered = chronological(df)
-    rank = ordered.groupby("setup").cumcount()
-    is_burn = (rank < burn_in).to_numpy()
+    ordered = chronological(df).copy()
+    ordered["burn_in"] = (ordered.groupby("setup").cumcount() < burn_in).to_numpy()
     ok = (ordered["checklist_ok"] == 1).to_numpy()
-    info = {"burn_in": int(is_burn.sum()), "off_checklist": int((~is_burn & ~ok).sum())}
-    return ordered[~is_burn & ok], info
+    info = {"burn_in": int((ordered["burn_in"].to_numpy() & ok).sum()),
+            "off_checklist": int((~ok).sum())}
+    return ordered[ok], info
 
 
 def block_bootstrap_mean(df, n_boot=10000, seed=0):
@@ -235,10 +238,12 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
 
     primary, info = primary_sample(df, burn_in)
     if info["burn_in"]:
-        print(f"\n!! {info['burn_in']} trades are pre-registered burn-in (the first "
-              f"{burn_in} of each setup)\n   and are excluded from the primary analysis.")
+        print(f"\n!! {info['burn_in']} trades are burn-in (the first {burn_in} of each "
+              f"setup). They are INCLUDED in\n   the primary analysis and flagged "
+              f"burn_in=True; each setup also shows its result\n   without them, "
+              f"for comparison only.")
     if info["off_checklist"]:
-        print(f"\n!! {info['off_checklist']} post-burn-in trades logged with "
+        print(f"\n!! {info['off_checklist']} trades logged with "
               f"checklist_ok=0. These are excluded from the\n   primary analysis — "
               f"they measure discipline (or, for generated trades, a\n   condition the "
               f"data could not verify), not the setup.")
@@ -256,6 +261,11 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
         print(f"\n--- {setup} " + "-" * (72 - len(setup)))
         print(f"  n={n}  sessions={g['session_date'].nunique()}  "
               f"win rate={wins/n:.1%}  mean={mean_r:+.3f}R  median={g['R'].median():+.3f}R")
+        if g["burn_in"].any():
+            later = g.loc[~g["burn_in"], "R"]
+            shown = f"mean={later.mean():+.3f}R" if len(later) else "no trades yet"
+            print(f"  without burn-in: n={len(later)} {shown}  "
+                  f"(comparison only; the gate uses every trade)")
         print(f"  sd={sigma:.3f}R  worst={g['R'].min():+.2f}R  best={g['R'].max():+.2f}R")
         print(f"  net P&L=${g['pnl_usd'].sum():,.0f}  "
               f"avg risk=${g['risk_usd'].mean():,.0f}/trade")
@@ -289,7 +299,7 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
     print(f"\n{'='*78}")
     if primary.empty:
         print("PORTFOLIO: no trades in the primary sample. Nothing to evaluate.")
-        print("Expected while a setup is still in burn-in, or when the data source")
+        print("Expected when no trade passed its checklist, or when the data source")
         print("cannot verify a condition — bar-only data leaves delta_confirmed=None,")
         print("which is recorded as a failed checklist rather than silently passed.")
         print("=" * 78 + "\n")
@@ -318,7 +328,7 @@ def main():
     ap.add_argument("--alpha", type=float, default=ALPHA,
                     help=f"significance level (default {ALPHA}, Bonferroni over 5 setups)")
     ap.add_argument("--burn-in", type=int, default=BURN_IN_TRADES,
-                    help=f"pre-registered burn-in trades per setup (default {BURN_IN_TRADES})")
+                    help=f"burn-in trades per setup, flagged not excluded (default {BURN_IN_TRADES})")
     ap.add_argument("--n-boot", type=int, default=10000)
     args = ap.parse_args()
 

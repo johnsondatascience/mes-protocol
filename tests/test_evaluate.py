@@ -67,8 +67,10 @@ def test_compute_r_is_net_of_stop_slippage():
 
 
 # --- burn-in -----------------------------------------------------------------
+# Amended 2026-09-15: burn-in trades stay in the primary sample, flagged, so
+# the report can show the result with and without them.
 
-def test_burn_in_is_first_trades_of_each_setup_chronologically():
+def test_burn_in_is_flagged_on_first_trades_of_each_setup_chronologically():
     s3 = make_log([-1.0] * BURN_IN_TRADES + [2.0] * 10, setup="VWAP_CONT")
     s1 = make_log([0.5] * (BURN_IN_TRADES + 5), setup="IB_BREAK")
     s1["trade_id"] += 1000
@@ -76,11 +78,14 @@ def test_burn_in_is_first_trades_of_each_setup_chronologically():
 
     primary, info = primary_sample(compute_r(log))
     counts = primary.groupby("setup").size().to_dict()
-    assert counts == {"VWAP_CONT": 10, "IB_BREAK": 5}, counts
-    assert (primary.loc[primary["setup"] == "VWAP_CONT", "gross_R"] == 2.0).all(), \
+    assert counts == {"VWAP_CONT": BURN_IN_TRADES + 10, "IB_BREAK": BURN_IN_TRADES + 5}, \
+        "burn-in trades are included in the primary sample"
+    s3p = primary[primary["setup"] == "VWAP_CONT"]
+    assert s3p.loc[s3p["burn_in"], "gross_R"].eq(-1.0).all() and \
+        s3p.loc[~s3p["burn_in"], "gross_R"].eq(2.0).all(), \
         "burn-in must be the chronologically first trades, not the first rows in the file"
-    assert info["burn_in"] == 2 * BURN_IN_TRADES
-    print(f"  burn-in excluded {info['burn_in']} trades; primary {counts}")
+    assert info["burn_in"] == 2 * BURN_IN_TRADES, info
+    print(f"  burn-in flagged {info['burn_in']} trades; primary {counts}")
 
 
 def test_burn_in_counts_off_checklist_trades():
@@ -89,8 +94,9 @@ def test_burn_in_counts_off_checklist_trades():
     log = make_log([1.0] * (BURN_IN_TRADES + 4))
     log.loc[:9, "checklist_ok"] = 0                                    # 10 of the first 30
     primary, info = primary_sample(compute_r(log))
-    assert len(primary) == 4, len(primary)
-    assert info["burn_in"] == BURN_IN_TRADES and info["off_checklist"] == 0, info
+    assert len(primary) == BURN_IN_TRADES + 4 - 10, len(primary)
+    assert int(primary["burn_in"].sum()) == BURN_IN_TRADES - 10, primary["burn_in"].sum()
+    assert info == {"burn_in": BURN_IN_TRADES - 10, "off_checklist": 10}, info
     print(f"  {info}")
 
 
@@ -161,17 +167,30 @@ def test_validate_rejects_stop_on_wrong_side():
 
 # --- report ------------------------------------------------------------------
 
-def test_report_applies_burn_in_and_names_the_gate():
+def test_report_includes_burn_in_and_names_the_gate():
     # gross +0.6R: comfortably clear of the n=60 gate after costs
     log = make_log(list(_series(0.6, BURN_IN_TRADES + 70, seed=9)))
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         report(compute_r(log), min_exp=0.15, alpha=0.01, n_boot=200)
     out = buf.getvalue()
-    assert "burn-in" in out.lower(), out
-    assert f"n=70 " in out, out
+    assert f"n={BURN_IN_TRADES + 70} " in out, "the gate sample includes burn-in"
+    assert f"without burn-in: n=70 " in out, out
     assert "gate:" in out and "CONTINUE" in out, out
-    print("  " + "\n  ".join(line for line in out.splitlines() if "gate" in line or "burn" in line))
+    print("  " + "\n  ".join(line for line in out.splitlines()
+                             if "gate" in line or "burn" in line))
+
+
+def test_gate_counts_burn_in_trades():
+    """With burn-in included, the first checkpoint is reached at 60 trades in
+    total, not 60 after burn-in."""
+    log = make_log(list(_series(0.6, FUTILITY_GATES[0], seed=11)))
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report(compute_r(log), min_exp=0.15, alpha=0.01, n_boot=200)
+    gate = next(line for line in buf.getvalue().splitlines() if "gate:" in line)
+    assert "COLLECT" not in gate and f"n={FUTILITY_GATES[0]}" in gate, gate
+    print(f" {gate}")
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@ def main() -> int:
                          "are flagged out of the primary sample")
     ap.add_argument("--contracts", type=int, default=1)
     ap.add_argument("--burn-in", type=int, default=BURN_IN_TRADES,
-                    help="pre-registered burn-in trades per setup, applied uniformly")
+                    help="burn-in trades per setup, flagged (not excluded), applied uniformly")
     ap.add_argument("--out", default="data/generated_trades.csv")
     ap.add_argument("--n-boot", type=int, default=10000)
     args = ap.parse_args()
