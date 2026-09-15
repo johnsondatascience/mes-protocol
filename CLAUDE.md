@@ -40,6 +40,8 @@ src/mesproto/
   sources.py    network access to FRED and federalreserve.gov (scripts only).
   news.py       scheduled-release calendar (FRED + federalreserve.gov): parsers,
                 the coverage-aware NewsCalendar, and the FOMC fetcher.
+  optimus.py    reads an Optimus Flow (Quantower) CSV export and compares its
+                delta with ours — the platform has no API, only files.
   signals.py    S1, IB_FAIL and S3 generators; pessimistic fill simulation.
                 S1 and IB_FAIL share one walk of the tape, so a break yields
                 at most one of them.
@@ -51,6 +53,7 @@ scripts/        run_pipeline.py — bars to evaluation in one command.
                 fetch_news_calendar.py — builds data/news_calendar.csv (network).
                 fetch_reference_closes.py — builds data/sp500_close.csv for
                 SPY point scaling (network).
+                compare_optimus_export.py — Optimus Flow CSV vs our saved bars.
 docs/           protocol.html — the study design these tools serve.
 ```
 

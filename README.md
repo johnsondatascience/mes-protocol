@@ -146,6 +146,25 @@ the bid the sell code (`aggressor_convention`). The run stops unless they agree
 on at least 95% of 1,000+ such trades. Comparing one session against Optimus
 Flow is still a good second check.
 
+### Second opinion from Optimus Flow
+
+Optimus Flow is a desktop platform (a Quantower white label on a Rithmic feed)
+with no API to query, so the check goes through a file it writes:
+
+1. In Optimus Flow, open the **History Exporter** panel.
+2. Pick the ES contract that was front month for the session, a **1-minute**
+   timeframe, and a single session's date range. Include volume analysis
+   (delta, or ask/bid volume) if your build offers it.
+3. Export to CSV, and note the platform's display timezone.
+4. `python scripts/compare_optimus_export.py --export <their.csv> --dbn <our.dbn.zst>`
+   (add `--tz` if the export is not in ET).
+
+It reports overlapping minutes, how often volume agrees, and whether their
+delta runs the same way as ours or the opposite way — the hand-logged setups
+(S2, S4) are read in that platform, so an inverted convention would make
+hand-logged and generated trades disagree on the one condition they share.
+Without a delta column it can only compare volume.
+
 Downloads are billed. `run_pipeline.py --databento` streams the raw file to
 `data/tbbo_<symbol>_<start>_<end>.dbn.zst` (or `--dbn PATH`) and reads that file
 on every later run instead of requesting it again. Price a request first with

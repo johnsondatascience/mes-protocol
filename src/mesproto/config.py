@@ -144,6 +144,8 @@ DAY_TYPE_MIN_TRADES = 5         # smallest day-type bucket worth printing
 OFF_CHECKLIST_WARN_FRAC = 0.25  # validate() warns above this share of checklist_ok=0
 AGGRESSOR_MIN_AGREEMENT = 0.95  # side codes must match the quotes on this share of
 AGGRESSOR_MIN_CLASSIFIED = 1000  # at least this many at-bid/at-ask trades before delta is trusted
+EXTERNAL_MIN_BARS = 60          # overlapping minutes needed before an external export is judged
+EXTERNAL_DELTA_MIN_CORR = 0.90  # |correlation| above which its delta is called same/inverted
 GAP_OPEN_PCT = 0.01             # |open / prior close - 1| beyond this is a gap-open session:
                                 # a different regime, reported separately but INCLUDED
                                 # in the primary sample (amended 2026-09-15)
