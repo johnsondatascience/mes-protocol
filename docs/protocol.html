@@ -365,7 +365,7 @@
         <dt>Entry</dt><dd>Limit at the IB edge ± 1 tick, on the retest only. No chasing the initial break.</dd>
         <dt>Stop</dt><dd>1 point beyond the retest swing. Floor 4 pts, cap 8 pts — if structure demands more than 8, stand down.</dd>
         <dt>Target</dt><dd>Mechanical series: 2R. Managed: half at 1R, runner to IB edge + 1.0 × IB range or a session VWAP break.</dd>
-        <dt>Stand down</dt><dd>FOMC / CPI / NFP days before 10:30 ET — FOMC meaning the statement day of a scheduled meeting, releases meaning the day they actually came out (clarified — see §09). Gap opens beyond 1% of prior close are a different regime — traded and flagged, and reported separately (amended — see §09).</dd>
+        <dt>Stand down</dt><dd>FOMC / CPI / NFP / PPI / retail sales days before 10:30 ET (PPI and retail sales amended in — see §09) — FOMC meaning the statement day of a scheduled meeting, releases meaning the day they actually came out (clarified — see §09). Gap opens beyond 1% of prior close are a different regime — traded and flagged, and reported separately (amended — see §09).</dd>
       </dl>
     </div>
     <div class="fail"><b>Known failure mode</b>The false break that reverses back through the entire IB. Log those as <code>IB_FAIL</code> with the same schema — the mirror trade may carry more edge than the setup itself, and you'll only find out if you record it.</div>
@@ -524,6 +524,7 @@ python mes_replay_eval.py trades.csv --min-expectancy 0.15 --alpha 0.01
         <tr><td class="mono-c">2026-09-15</td><td>S1 sessions that open more than 1% away from the prior close are no longer excluded. The trades are kept, the gap is logged in <code>gap_pct</code>, and the report shows gap-open sessions on their own line.</td><td>S1 — none collected yet</td></tr>
         <tr><td class="mono-c">2026-09-15</td><td>Trade log records the mechanical exit as a price and reason (<code>mech_exit_px</code>, <code>mech_exit_reason</code>) instead of a typed <code>mech_exit_R</code>, which is now computed. Adds <code>contract</code>, <code>gap_pct</code> and <code>failed_checks</code>. A logging change, not a rule change.</td><td>None</td></tr>
         <tr><td class="mono-c">2026-09-15</td><td>Clarifies the S1 news stand-down. An FOMC day is the statement day of a scheduled meeting; unscheduled meetings, notation votes and cancelled meetings do not count, since none could be planned around that morning. CPI and NFP days are the dates the release actually came out (FRED), including delayed releases. A session the news calendar does not cover cannot verify the stand-down and leaves the primary sample.</td><td>None — clarifies an undefined term</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>S1 also stands down before 10:30 ET on PPI and advance retail sales release days. Together with FOMC, CPI and NFP that is about 50 sessions a year (roughly one in five), up from about 32.</td><td>S1 — none collected yet</td></tr>
       </tbody>
     </table>
   </div>

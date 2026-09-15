@@ -417,6 +417,24 @@ def test_s1_news_day_stands_down_before_1030():
           f"no calendar or uncovered session -> None")
 
 
+def test_s1_news_events_are_the_amended_list():
+    """Amended 2026-09-15: PPI and retail sales join FOMC, CPI and NFP. Pinned
+    so the list cannot drift without a test — and a restarted S1 sample."""
+    assert set(S1_NEWS_EVENTS) == {"FOMC", "CPI", "NFP", "PPI", "RETAIL_SALES"}, S1_NEWS_EVENTS
+
+    bars = s1_quick_retest_bars(break_delta=500.0,
+                                retest_deltas=[-50.0, -50.0, -50.0, -50.0, -50.0])
+    d = S1_LOOKAHEAD_DATE
+    lv = {x.date: x for x in build_sessions(bars, tick=TICK)}[d]
+    for event in ("PPI", "RETAIL_SALES"):
+        cal = NewsCalendar(start=d, end=d, events=frozenset(S1_NEWS_EVENTS),
+                           days={d: frozenset({event})})
+        sigs = generate_s1(bars, lv, MES, news=cal)
+        assert all(s.signal_time.time() >= time(10, 30) for s in sigs), \
+            (event, [s.signal_time.time() for s in sigs])
+    print("  PPI and retail-sales days stand S1 down before 10:30")
+
+
 def test_s3_checklist_maps_every_protocol_condition():
     """Day gate (3 conditions + VWAP-chop stand-down) and trigger, each named."""
     bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)

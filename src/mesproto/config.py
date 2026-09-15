@@ -88,7 +88,8 @@ NEWS_FRED_RELEASES = {                    # event -> FRED release_id
     "PPI": 46,                            # Producer Price Index (BLS)
     "RETAIL_SALES": 9,                    # Advance Monthly Sales for Retail and Food Services
 }
-S1_NEWS_EVENTS = (FOMC_EVENT, "CPI", "NFP")
+S1_NEWS_EVENTS = (FOMC_EVENT, "CPI", "NFP", "PPI", "RETAIL_SALES")   # PPI, retail sales
+                                                                    # added 2026-09-15
 NEWS_CALENDAR_START = date(2015, 1, 1)    # default first day the fetch script covers
 NEWS_CALENDAR_LAG_DAYS = 1                # coverage ends this many days before the fetch:
                                           # FRED lists a release only once its data loads
