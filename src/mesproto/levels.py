@@ -35,7 +35,7 @@ import re
 import warnings
 from dataclasses import dataclass, field
 from datetime import date, time, timedelta
-from typing import Iterable, Literal, Optional, Sequence
+from typing import Iterable, Literal, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -105,6 +105,24 @@ def load_csv_bars(
             ZoneInfo(tz), nonexistent="shift_forward", ambiguous="infer")
     df = df.drop(columns=[timestamp_col]).set_index(idx)
     return _finalize(df, source)
+
+
+def load_reference_closes(path: str) -> dict[date, float]:
+    """Daily reference closes (S&P 500 index, standing in for ES) for SPY point
+    scaling: `date,close` rows; '#' comments and the header are skipped, and a
+    malformed row raises rather than leaving a silent hole."""
+    out: dict[date, float] = {}
+    with open(path, encoding="utf-8") as fh:
+        for n, raw in enumerate(fh, start=1):
+            line = raw.split("#", 1)[0].strip()
+            if not line or line.replace(" ", "") == "date,close":
+                continue
+            day, _, close = line.partition(",")
+            try:
+                out[date.fromisoformat(day.strip())] = float(close)
+            except ValueError:
+                raise ValueError(f"{path}:{n}: expected YYYY-MM-DD,close, got {line!r}") from None
+    return out
 
 
 def load_dataframe_bars(df: pd.DataFrame, source: SourceKind = "SPY") -> pd.DataFrame:
@@ -440,6 +458,13 @@ class SessionLevels:
     cum_delta: Optional[pd.Series]
     delta_at_extreme: Optional[bool]
 
+    # Multiplier taking the setups' ES-point thresholds into this tape's
+    # points: 1.0 for futures; for SPY, the prior day's SPY close over the
+    # prior day's reference close. None when that ratio is unknown — the
+    # generators then produce nothing rather than use thresholds in the
+    # wrong units.
+    point_scale: Optional[float]
+
     @property
     def gap_pct(self) -> Optional[float]:
         """Signed open-vs-prior-close gap as a fraction. None without a prior session."""
@@ -559,12 +584,17 @@ def build_sessions(
     cutoff: time = DAY_TYPE_CUTOFF,
     value_area: float = VALUE_AREA_PCT,
     dates: Optional[Iterable[date]] = None,
+    reference_closes: Optional[Mapping[date, float]] = None,
 ) -> list[SessionLevels]:
     """Build a SessionLevels record per RTH session.
 
     Every field that feeds day classification is computed from bars at or
     before `cutoff`. The full-session high/low/close are recorded for outcome
     evaluation but never touch the classification path.
+
+    `reference_closes` (SPY only) are daily S&P 500 closes keyed by date. A
+    session's point_scale uses the PRIOR session's SPY close and the reference
+    close on that same date: today's close is not known at 10:00.
     """
     source: SourceKind = bars.attrs.get("source", "SPY")
     all_dates = _session_dates(bars)
@@ -586,6 +616,11 @@ def build_sessions(
         prior_d = all_dates[i - 1] if i > 0 else None
         pp = prior_profiles.get(prior_d) if prior_d else None
         prior_close = prior_closes.get(prior_d) if prior_d else None
+        if source == "FUTURES":
+            point_scale: Optional[float] = 1.0
+        else:
+            ref = (reference_closes or {}).get(prior_d) if prior_d else None
+            point_scale = prior_close / ref if prior_close and ref else None
 
         ib = rth.between_time(RTH_OPEN, IB_END, inclusive="left")
         if ib.empty:
@@ -645,6 +680,7 @@ def build_sessions(
             day_type=_classify(otf_up, otf_down, opened_inside, pre, crosses),
             classified_at=cutoff,
             cum_delta=cd, delta_at_extreme=at_extreme,
+            point_scale=point_scale,
         ))
 
     if source == "SPY":

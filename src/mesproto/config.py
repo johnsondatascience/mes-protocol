@@ -95,6 +95,15 @@ NEWS_CALENDAR_LAG_DAYS = 1                # coverage ends this many days before 
                                           # FRED lists a release only once its data loads
 FRED_RELEASE_DATES_URL = "https://api.stlouisfed.org/fred/release/dates"
 FRED_MAX_LIMIT = 10000
+FRED_SERIES_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
+FRED_OBSERVATIONS_MAX_LIMIT = 100000
+
+# --- SPY proxy point scaling (added 2026-09-15) -----------------------------
+# Setup thresholds are ES points. A SPY session multiplies every one of them by
+# SPY's prior-day close / the reference close on that same prior day. FRED's
+# S&P 500 index close stands in for ES: the two differ by well under 1%, at most
+# about one SPY cent on the widest threshold. FRED keeps 10 years of it.
+SPY_REFERENCE_SERIES = "SP500"
 FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
 FOMC_HISTORICAL_URL = "https://www.federalreserve.gov/monetarypolicy/fomchistorical{year}.htm"
 HTTP_TIMEOUT_S = 30

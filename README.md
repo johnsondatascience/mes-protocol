@@ -45,7 +45,9 @@ only needed for the TBBO loader.
 #    re-run before each evaluation block — it covers through yesterday
 python scripts/fetch_news_calendar.py
 
-# 1. prototype on free SPY minute bars (no overnight session — S5 unavailable)
+# 1. prototype on free SPY minute bars (no overnight session — S5 unavailable).
+#    Thresholds are ES points, scaled per day by SPY / S&P 500 closes:
+python scripts/fetch_reference_closes.py
 python scripts/run_pipeline.py --csv data/spy_1min.csv --contract SPY
 
 # 2. the real thing, one contract month at a time
@@ -98,6 +100,20 @@ Nothing in `data/` is committed. Options, cheapest first:
 
 Always pull a single expiry. Back-adjusted continuous series shift historical
 prices by accumulated roll gaps, which corrupts every level this repo computes.
+
+### SPY point scaling
+
+Every setup threshold in points (S1's 2-point retest and 4/8-point stops, S3's
+±2-point tolerances and 5/10-point stops, IB_FAIL's stops) is written in ES
+points. On a SPY session each is multiplied by that session's `point_scale`:
+the **prior** day's SPY close divided by the S&P 500 index close on the same
+day, from `data/sp500_close.csv` (`scripts/fetch_reference_closes.py`, FRED
+series SP500, same free key). The prior day, because today's close is not
+known at 10:00. The index stands in for ES: they differ by well under 1%,
+about one SPY cent on the widest threshold. FRED keeps 10 years, so SPY runs
+start no earlier than 2016-09-15. A session with no reference close for its
+prior day has `point_scale=None` and S1, IB_FAIL and S3 generate nothing on
+it. Percentage thresholds (the IB range filter, the gap flag) are unscaled.
 
 ### News calendar
 

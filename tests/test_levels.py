@@ -318,6 +318,74 @@ def test_spy_has_no_overnight():
     print("  SPY: overnight fields None, s5_gate False, warning raised")
 
 
+# --- SPY point scaling (added 2026-09-15) -----------------------------------
+
+def _spy_two_days():
+    d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
+    prior = make_session(d0, balance_path(500.0), overnight=False)
+    today = make_session(d1, trend_path(504.0, slope=0.003), overnight=False)
+    return build([prior, today], source="SPY"), d0, d1
+
+
+def _sessions_quiet(bars, **kw):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return {s.date: s for s in build_sessions(bars, **kw)}
+
+
+def test_spy_point_scale_uses_prior_day_closes():
+    """ES-point thresholds become SPY points by the ratio of the two closes on
+    the PRIOR trading day — today's close is not known at 10:00."""
+    bars, d0, d1 = _spy_two_days()
+    spy_close_d0 = float(bars[bars.index.date == d0]["close"].iloc[-1])
+    ref = {d0: spy_close_d0 * 10.05, d1: 99999.0}      # d1's own close must not be used
+    s = _sessions_quiet(bars, tick=0.01, reference_closes=ref)
+    assert s[d0].point_scale is None, "no prior day, no ratio"
+    assert abs(s[d1].point_scale - 1 / 10.05) < 1e-12, s[d1].point_scale
+    print(f"  SPY {spy_close_d0:.2f} / S&P {ref[d0]:.2f} -> scale {s[d1].point_scale:.5f}")
+
+
+def test_spy_point_scale_is_none_without_a_reference_close():
+    """Invariant 2: no reference close for the prior day means no ratio — never
+    a guessed 1/10."""
+    bars, d0, d1 = _spy_two_days()
+    assert _sessions_quiet(bars, tick=0.01)[d1].point_scale is None
+    assert _sessions_quiet(bars, tick=0.01,
+                           reference_closes={d1: 5040.0})[d1].point_scale is None
+    print("  no reference for the prior day -> point_scale None")
+
+
+def test_futures_point_scale_is_one():
+    d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
+    bars = build([make_session(d0, balance_path(5000.0)), make_session(d1, trend_path(5040.0))])
+    s = {x.date: x for x in build_sessions(bars, tick=TICK)}
+    assert s[d0].point_scale == 1.0 and s[d1].point_scale == 1.0
+    print("  futures: thresholds are already in ES points")
+
+
+def test_load_reference_closes():
+    import os
+    import tempfile
+    from mesproto.levels import load_reference_closes
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("# S&P 500 close (FRED SP500)\ndate,close\n2026-03-02,5012.5\n2026-03-03,5031.25\n")
+        assert load_reference_closes(path) == {date(2026, 3, 2): 5012.5, date(2026, 3, 3): 5031.25}
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("2026-03-04,n/a\n")
+        try:
+            load_reference_closes(path)
+        except ValueError as e:
+            assert ":5:" in str(e), e
+        else:
+            raise AssertionError("a malformed close must not be skipped")
+    finally:
+        os.remove(path)
+    print("  comments/header skipped; malformed row raises with its line")
+
+
 def test_futures_overnight_and_delta():
     d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
     prior = make_session(d0, balance_path(5000.0))

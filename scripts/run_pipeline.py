@@ -19,7 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mesproto import (  # noqa: E402
     CONTRACTS, build_sessions, fills_to_log, load_csv_bars,
-    load_databento_tbbo, load_news_calendar, sessions_to_frame, validate,
+    load_databento_tbbo, load_news_calendar, load_reference_closes, sessions_to_frame,
+    validate,
 )
 from mesproto.config import ALPHA, BURN_IN_TRADES, MIN_EXPECTANCY_R  # noqa: E402
 from mesproto.evaluate import compute_r, report  # noqa: E402
@@ -43,6 +44,9 @@ def main() -> int:
                     help="built by scripts/fetch_news_calendar.py. S1 signals before "
                          "10:30 on sessions it does not cover cannot verify the "
                          "stand-down and are flagged out of the primary sample")
+    ap.add_argument("--reference-closes", metavar="PATH", default="data/sp500_close.csv",
+                    help="SPY only: S&P 500 daily closes from scripts/fetch_reference_closes.py, "
+                         "used to scale ES-point thresholds by the prior day's ratio")
     ap.add_argument("--contracts", type=int, default=1)
     ap.add_argument("--burn-in", type=int, default=BURN_IN_TRADES,
                     help="burn-in trades per setup, flagged (not excluded), applied uniformly")
@@ -59,9 +63,24 @@ def main() -> int:
         bars = load_databento_tbbo(symbols=args.databento, start=args.start,
                                    end=args.end)
 
-    sessions = build_sessions(bars, tick=contract.tick)
+    is_spy = bars.attrs.get("source") == "SPY"
+    reference = None
+    if is_spy:
+        if Path(args.reference_closes).is_file():
+            reference = load_reference_closes(args.reference_closes)
+        else:
+            print(f"warn: no reference closes at {args.reference_closes} — run "
+                  f"scripts/fetch_reference_closes.py. Without them no SPY session can "
+                  f"scale the ES-point thresholds, so S1, IB_FAIL and S3 generate nothing.")
+
+    sessions = build_sessions(bars, tick=contract.tick, reference_closes=reference)
     print(f"built {len(sessions)} sessions from {len(bars):,} bars "
           f"({bars.index[0]} .. {bars.index[-1]})")
+    if is_spy:
+        unscaled = sum(s.point_scale is None for s in sessions)
+        if unscaled:
+            print(f"warn: {unscaled} of {len(sessions)} SPY sessions have no reference "
+                  f"close for the prior day; S1, IB_FAIL and S3 skip them.")
     sf = sessions_to_frame(sessions)
     if not sf.empty:
         print("\nday types:")

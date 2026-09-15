@@ -2,7 +2,25 @@
 """Tests for mesproto.sources — parsers for FRED responses, pinned offline."""
 from datetime import date
 
-from mesproto.sources import parse_fred_release_dates
+from mesproto.sources import parse_fred_observations, parse_fred_release_dates
+
+
+def test_fred_observations_skip_missing_values():
+    """FRED marks market holidays with '.'; those days have no close at all."""
+    payload = {"count": 3, "observations": [
+        {"date": "2026-01-16", "value": "6940.01"},
+        {"date": "2026-01-19", "value": "."},
+        {"date": "2026-01-20", "value": "6796.86"}]}
+    assert parse_fred_observations(payload) == \
+        {date(2026, 1, 16): 6940.01, date(2026, 1, 20): 6796.86}
+    for bad in ({"error_code": 400, "error_message": "Bad Request."},
+                {**payload, "count": 5000}):
+        try:
+            parse_fred_observations(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad} must raise")
+    print("  '.' skipped; API error and truncated response raise")
 
 
 def test_fred_release_dates():

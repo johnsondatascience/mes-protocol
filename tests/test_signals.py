@@ -612,6 +612,80 @@ def test_ib_fail_flows_through_run_all_and_validates():
           f"{row['exit_px']}")
 
 
+# --- SPY: ES-point thresholds scaled by the day (added 2026-09-15) -----------
+
+def to_spy(futures_bars, scale=10.0):
+    """The same tape as a SPY proxy: RTH only, prices / `scale`, no delta."""
+    t = futures_bars.index.time
+    rth = futures_bars[(t >= time(9, 30)) & (t < time(16, 0))].copy()
+    rth[["open", "high", "low", "close"]] /= scale
+    rth[["buy_volume", "sell_volume"]] = np.nan
+    return load_dataframe_bars(rth, source="SPY")
+
+
+def _spy_sessions(bars, ratio=10.0):
+    """Sessions whose S&P reference close on each prior day is `ratio` x SPY's."""
+    import warnings
+    closes = bars.groupby(bars.index.date)["close"].last()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return {s.date: s for s in build_sessions(
+            bars, tick=SPY.tick, reference_closes={d: c * ratio for d, c in closes.items()})}
+
+
+def test_spy_s1_and_ib_fail_thresholds_scale_by_the_day():
+    """With a 1:10 ratio, S1's 4-point stop floor is 0.40 on SPY, and IB_FAIL's
+    stop sits 0.10 (not 1.00) beyond the false break."""
+    d = S1_LOOKAHEAD_DATE
+    bars = to_spy(s1_quick_retest_bars(break_delta=500.0,
+                                       retest_deltas=[-50.0] * 5))
+    lv = _spy_sessions(bars)[d]
+    assert abs(lv.point_scale - 0.1) < 1e-12
+    s1 = generate_s1(bars, lv, SPY)
+    assert s1 and abs(s1[0].risk_pts - S1_STOP_FLOOR_PTS * 0.1) < 1e-9, \
+        [(s.entry_px, s.stop_px) for s in s1]
+
+    bars = to_spy(ib_fail_bars())
+    lv = _spy_sessions(bars)[d]
+    fail = generate_ib_fail(bars, lv, SPY)
+    assert fail, "the scaled failure should still trade"
+    assert abs(fail[0].stop_px - (501.3 + IB_FAIL_STOP_BEYOND_EXTREME_PTS * 0.1)) < 1e-9, \
+        fail[0].stop_px
+    assert fail[0].context["point_scale"] == lv.point_scale
+    print(f"  S1 risk {s1[0].risk_pts:.2f}; IB_FAIL stop {fail[0].stop_px:.2f} "
+          f"(risk {fail[0].risk_pts:.2f})")
+
+
+def test_spy_s3_thresholds_scale_by_the_day():
+    from mesproto.config import S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS
+    bars = to_spy(build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)[0])
+    lv = _spy_sessions(bars)[date(2026, 3, 3)]
+    sigs = generate_s3(bars, lv, SPY)
+    assert sigs, "the scaled S3 day should still signal"
+    for s in sigs:
+        assert S3_STOP_FLOOR_PTS * 0.1 - 1e-9 <= s.risk_pts <= S3_STOP_CAP_PTS * 0.1 + 1e-9, \
+            s.risk_pts
+    print(f"  S3 on SPY: risk {sigs[0].risk_pts:.2f} within 0.50-1.00")
+
+
+def test_spy_sessions_without_a_ratio_generate_nothing():
+    """No reference close for the prior day: every point threshold is unknown,
+    so nothing is generated — never thresholds in the wrong units."""
+    import warnings
+    d = S1_LOOKAHEAD_DATE
+    for bars, gen in ((to_spy(s1_quick_retest_bars(break_delta=500.0,
+                                                   retest_deltas=[-50.0] * 5)), generate_s1),
+                      (to_spy(ib_fail_bars()), generate_ib_fail),
+                      (to_spy(build_two_days(s3_path(), day2_vol=s3_volumes(),
+                                             day2_on=5040.0)[0]), generate_s3)):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            lv = {s.date: s for s in build_sessions(bars, tick=SPY.tick)}[d]
+        assert lv.point_scale is None
+        assert gen(bars, lv, SPY) == [], gen.__name__
+    print("  S1, IB_FAIL, S3 -> [] without a ratio")
+
+
 def test_s3_checklist_maps_every_protocol_condition():
     """Day gate (3 conditions + VWAP-chop stand-down) and trigger, each named."""
     bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)

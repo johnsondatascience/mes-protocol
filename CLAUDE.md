@@ -34,8 +34,9 @@ src/mesproto/
   config.py     all constants: contract specs, cost model, session times,
                 setup thresholds, statistical parameters. No magic numbers
                 anywhere else — if you find one, move it here.
-  levels.py     loaders (CSV / Databento TBBO) -> bars; volume profile and
-                value area; SessionLevels per RTH day; day-type classification.
+  levels.py     loaders (CSV / Databento TBBO / reference closes) -> bars;
+                volume profile and value area; SessionLevels per RTH day
+                (incl. point_scale for SPY); day-type classification.
   sources.py    network access to FRED and federalreserve.gov (scripts only).
   news.py       scheduled-release calendar (FRED + federalreserve.gov): parsers,
                 the coverage-aware NewsCalendar, and the FOMC fetcher.
@@ -48,6 +49,8 @@ src/mesproto/
 tests/          run directly (python tests/test_x.py) or with pytest.
 scripts/        run_pipeline.py — bars to evaluation in one command.
                 fetch_news_calendar.py — builds data/news_calendar.csv (network).
+                fetch_reference_closes.py — builds data/sp500_close.csv for
+                SPY point scaling (network).
 docs/           protocol.html — the study design these tools serve.
 ```
 
@@ -69,7 +72,9 @@ Data flow: `bars -> build_sessions -> run_all -> fills_to_log -> compute_r -> re
    `False`. Do not "fix" this by using the 09:30 open, the prior close, or
    extended-hours equity bars. The same holds for the news calendar: a
    session outside its declared coverage, or an event type it does not carry,
-   is `None` — never a quiet day.
+   is `None` — never a quiet day. And for SPY point scaling: a session with
+   no prior-day reference close has `point_scale=None` and generates nothing;
+   never substitute a fixed 1/10 or today's close.
 3. **Fill conventions stay pessimistic.** Limit entries require trading
    *strictly through* the level. Stop entries pay a tick. When one bar contains
    both stop and target, the **stop** is assumed first and `ambiguous_bar` is
@@ -126,6 +131,8 @@ A setup generator is complete when all of the following hold:
 - [ ] Output flows through `fills_to_log` and passes `schema.validate`.
 - [ ] Its stand-down windows (news releases, time-of-day) are enforced from
       `config.py`, not hardcoded.
+- [ ] Every threshold in points is multiplied by `lv.point_scale`, and the
+      generator returns `[]` when that is `None`.
 
 ## Testing
 

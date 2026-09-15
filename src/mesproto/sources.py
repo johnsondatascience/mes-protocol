@@ -16,7 +16,10 @@ from datetime import date
 from pathlib import Path
 from typing import Mapping, Optional
 
-from .config import FRED_MAX_LIMIT, FRED_RELEASE_DATES_URL, HTTP_TIMEOUT_S, HTTP_USER_AGENT
+from .config import (
+    FRED_MAX_LIMIT, FRED_OBSERVATIONS_MAX_LIMIT, FRED_RELEASE_DATES_URL,
+    FRED_SERIES_OBSERVATIONS_URL, HTTP_TIMEOUT_S, HTTP_USER_AGENT,
+)
 
 
 def http_get(url: str, params: Optional[dict] = None) -> bytes:
@@ -60,6 +63,28 @@ def parse_fred_release_dates(payload: Mapping) -> list[date]:
         raise ValueError(f"FRED response is truncated ({len(listed)} of "
                          f"{payload['count']} dates)")
     return sorted(date.fromisoformat(r["date"]) for r in listed)
+
+
+def parse_fred_observations(payload: Mapping) -> dict[date, float]:
+    """{date: value} from a fred/series/observations JSON response. FRED marks
+    days without a value (market holidays) with '.'; they are left out, not
+    filled."""
+    if "error_message" in payload or "observations" not in payload:
+        raise ValueError(f"FRED error: {payload.get('error_message', 'no observations')}")
+    listed = payload["observations"]
+    if int(payload.get("count", len(listed))) > len(listed):
+        raise ValueError(f"FRED response is truncated ({len(listed)} of "
+                         f"{payload['count']} observations)")
+    return {date.fromisoformat(o["date"]): float(o["value"])
+            for o in listed if o["value"] != "."}
+
+
+def fetch_fred_observations(series_id: str, api_key: str) -> dict[date, float]:
+    """Every observation FRED holds for a series."""
+    params = {"series_id": series_id, "api_key": api_key, "file_type": "json",
+              "limit": FRED_OBSERVATIONS_MAX_LIMIT, "sort_order": "asc"}
+    return parse_fred_observations(
+        _fred_json(FRED_SERIES_OBSERVATIONS_URL, params, f"series {series_id}"))
 
 
 def fetch_fred_release_dates(release_id: int, api_key: str) -> list[date]:

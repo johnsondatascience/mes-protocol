@@ -218,8 +218,15 @@ def _ib_break_signals(
 ) -> list[Signal]:
     """One walk of the S1 window emitting both IB_BREAK and IB_FAIL signals."""
     out: list[Signal] = []
-    if not lv.s1_gate():
+    if not lv.s1_gate() or lv.point_scale is None:
         return out
+    # ES-point thresholds in this tape's points (1.0 on futures)
+    k = lv.point_scale
+    reentry_tol = S1_RETEST_MAX_REENTRY_PTS * k
+    s1_beyond, s1_floor, s1_cap = (S1_STOP_BEYOND_SWING_PTS * k, S1_STOP_FLOOR_PTS * k,
+                                   S1_STOP_CAP_PTS * k)
+    fail_beyond, fail_floor, fail_cap = (IB_FAIL_STOP_BEYOND_EXTREME_PTS * k,
+                                         IB_FAIL_STOP_FLOOR_PTS * k, IB_FAIL_STOP_CAP_PTS * k)
 
     rth = rth_slice(bars, lv.date)
     win_mask = _between(rth.index, *S1_BREAK_WINDOW)
@@ -243,7 +250,8 @@ def _ib_break_signals(
                 "ib_range_pts": lv.ib_range, "day_type": lv.day_type,
                 "on_range_pos": lv.on_range_pos,   # S5 as a covariate
                 "gap_pct": lv.gap_pct,
-                "break_time": str(win.index[break_i].time()), **extra}
+                "break_time": str(win.index[break_i].time()),
+                "point_scale": k, **extra}
 
     state = "WAITING"
     direction: Optional[Direction] = None
@@ -280,15 +288,15 @@ def _ib_break_signals(
         # A wick deeper inside that closes within it is a retest that held
         # (amended 2026-09-15); the wick still sets the swing the stop goes beyond.
         reentry = (edge - bar["close"]) if direction == "LONG" else (bar["close"] - edge)
-        if reentry > S1_RETEST_MAX_REENTRY_PTS:
+        if reentry > reentry_tol:
             fail_news = news_status(ts)
             if fail_news is not False:
                 fail_sign = -sign
                 entry = float(bar["low"] - contract.tick) if fail_sign < 0 \
                     else float(bar["high"] + contract.tick)
-                raw_stop = break_extreme - fail_sign * IB_FAIL_STOP_BEYOND_EXTREME_PTS
+                raw_stop = break_extreme - fail_sign * fail_beyond
                 stop = _clamp_stop(entry, raw_stop, fail_sign,
-                                   IB_FAIL_STOP_FLOOR_PTS, IB_FAIL_STOP_CAP_PTS)
+                                   fail_floor, fail_cap)
                 if stop is not None:
                     out.append(Signal(
                         setup="IB_FAIL", session_date=lv.date,
@@ -333,11 +341,11 @@ def _ib_break_signals(
                 continue
 
         entry = edge + sign * contract.tick
-        raw_stop = retest_extreme - sign * S1_STOP_BEYOND_SWING_PTS
+        raw_stop = retest_extreme - sign * s1_beyond
         # the swing must be on the correct side of entry to be a stop at all
         if sign * (entry - raw_stop) <= 0:
-            raw_stop = entry - sign * S1_STOP_FLOOR_PTS
-        stop = _clamp_stop(entry, raw_stop, sign, S1_STOP_FLOOR_PTS, S1_STOP_CAP_PTS)
+            raw_stop = entry - sign * s1_floor
+        stop = _clamp_stop(entry, raw_stop, sign, s1_floor, s1_cap)
         if stop is None:
             # The swing only gets wider on later bars, so S1 is done with this
             # break — but it stays armed, because it can still fail (IB_FAIL).
@@ -452,8 +460,11 @@ def generate_s3(
     bar's extreme. Pick one and never mix within a sample.
     """
     out: list[Signal] = []
-    if not lv.s3_gate():
+    if not lv.s3_gate() or lv.point_scale is None:
         return out
+    k = lv.point_scale                       # ES points -> this tape's points
+    vwap_tol, edge_tol = S3_VWAP_TOLERANCE_PTS * k, S3_VA_EDGE_TOLERANCE_PTS * k
+    stop_floor, stop_cap = S3_STOP_FLOOR_PTS * k, S3_STOP_CAP_PTS * k
 
     rth = rth_slice(bars, lv.date)
     confirm_at = _otf_confirm_time(rth, lv.classified_at)
@@ -514,8 +525,8 @@ def generate_s3(
         va_edge = None if developing is None else \
             (developing.vah if direction == "LONG" else developing.val)
 
-        near_vwap = came_back(float(v), probe, reached, S3_VWAP_TOLERANCE_PTS)
-        near_edge = came_back(va_edge, probe, reached, S3_VA_EDGE_TOLERANCE_PTS)
+        near_vwap = came_back(float(v), probe, reached, vwap_tol)
+        near_edge = came_back(va_edge, probe, reached, edge_tol)
         near = near_vwap or near_edge
 
         if not near:
@@ -562,12 +573,12 @@ def generate_s3(
         # stop is always on the losing side of entry.
         anchor = min(pb_extreme, entry) if direction == "LONG" else max(pb_extreme, entry)
         node = _low_volume_node(developing, anchor, sign, contract.tick,
-                                furthest=entry - sign * (S3_STOP_CAP_PTS - contract.tick))
+                                furthest=entry - sign * (stop_cap - contract.tick))
         if node is None:
             in_pullback = False              # nothing thin within the cap: no trade
             continue
         stop = _clamp_stop(entry, node - sign * contract.tick, sign,
-                           S3_STOP_FLOOR_PTS, S3_STOP_CAP_PTS)
+                           stop_floor, stop_cap)
         if stop is None:
             in_pullback = False
             continue
@@ -597,6 +608,7 @@ def generate_s3(
                 "on_range_pos": lv.on_range_pos,
                 "gap_pct": lv.gap_pct,
                 "confirmed_at": str(confirm_at.time()),
+                "point_scale": k,
             },
         ))
         in_pullback = False
