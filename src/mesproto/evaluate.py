@@ -12,6 +12,10 @@ reports:
     only at the pre-registered checkpoints
   - day-type conditional breakdown, exit mix, ambiguous-bar share
 
+Setups in EXPLORATORY_SETUPS (IB_FAIL) are reported but never judged: no gate
+verdict, no confirmation sample size, and they are left out of the portfolio.
+They sit outside the Bonferroni family of N_SETUPS_TESTED.
+
 The primary sample excludes every checklist_ok=0 trade. Burn-in (per setup,
 the chronologically first BURN_IN_TRADES trades) is included and flagged —
 protocol amendment 2026-09-15.
@@ -67,7 +71,7 @@ from scipy.stats import norm
 from .config import (
     ALPHA, BOOTSTRAP_CI, BURN_IN_TRADES, CONFIRM_N_MIN_EFFECT_R,
     CONFIRM_N_MIN_SIGMA_R, CONFIRM_POWER, CONTRACTS, DAY_TYPE_MIN_TRADES,
-    FUTILITY_GATES, GAP_OPEN_PCT, GATE_CONFIDENCE,
+    EXPLORATORY_SETUPS, FUTILITY_GATES, GAP_OPEN_PCT, GATE_CONFIDENCE,
     GATE_SIGMA_FLOOR_R, MIN_EXPECTANCY_R, PRICE_EPS, STOP_ORDER_EXITS,
 )
 from .schema import validate
@@ -286,7 +290,9 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
         lo, hi = bootstrap_ci(boot)
         p_le_0 = (boot <= 0).mean()
 
-        print(f"\n--- {setup} " + "-" * (72 - len(setup)))
+        exploratory = setup in EXPLORATORY_SETUPS
+        title = f"{setup} (EXPLORATORY)" if exploratory else setup
+        print(f"\n--- {title} " + "-" * (72 - len(title)))
         print(f"  n={n}  sessions={g['session_date'].nunique()}  "
               f"win rate={wins/n:.1%}  mean={mean_r:+.3f}R  median={g['R'].median():+.3f}R")
         if g["burn_in"].any():
@@ -308,8 +314,14 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
               f"avg risk=${g['risk_usd'].mean():,.0f}/trade")
         print(f"  session-block bootstrap {BOOTSTRAP_CI:.0%} CI on mean R: "
               f"[{lo:+.3f}, {hi:+.3f}]   P(mean<=0)={p_le_0:.3f}")
-        print(f"  gate: {futility_verdict(g['R'].to_numpy(), min_exp)}")
-        if not np.isnan(sigma) and mean_r > 0:
+        if exploratory:
+            # described, never judged: a PASS here would read as a path to live
+            # capital for a setup outside the tested family
+            print("  exploratory: no gate verdict and no confirmation claim — a promising "
+                  "result\n  needs its own pre-registered sample before it counts")
+        else:
+            print(f"  gate: {futility_verdict(g['R'].to_numpy(), min_exp)}")
+        if not exploratory and not np.isnan(sigma) and mean_r > 0:
             need = confirm_n(max(mean_r, CONFIRM_N_MIN_EFFECT_R),
                              max(sigma, CONFIRM_N_MIN_SIGMA_R), alpha)
             print(f"  n to confirm this effect at alpha={alpha}, "
@@ -334,20 +346,25 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
                       f"convention — if large, only replay can settle them")
 
     print(f"\n{'='*78}")
-    if primary.empty:
-        print("PORTFOLIO: no trades in the primary sample. Nothing to evaluate.")
+    left_out = primary[primary["setup"].isin(EXPLORATORY_SETUPS)]
+    tested = primary[~primary["setup"].isin(EXPLORATORY_SETUPS)]
+    if tested.empty:
+        print("PORTFOLIO: no trades from tested setups in the primary sample. Nothing to evaluate.")
         print("Expected when no trade passed its checklist, or when the data source")
         print("cannot verify a condition — bar-only data leaves delta_confirmed=None,")
         print("which is recorded as a failed checklist rather than silently passed.")
         print("=" * 78 + "\n")
         return
 
-    print("PORTFOLIO (primary sample, all setups)")
-    boot = block_bootstrap_mean(primary, n_boot=n_boot)
+    print("PORTFOLIO (primary sample, tested setups)")
+    if not left_out.empty:
+        counts = ", ".join(f"{s}: n={len(g)}" for s, g in left_out.groupby("setup"))
+        print(f"  excludes exploratory setups ({counts})")
+    boot = block_bootstrap_mean(tested, n_boot=n_boot)
     lo, hi = bootstrap_ci(boot)
-    print(f"  n={len(primary)}  mean={primary['R'].mean():+.3f}R  "
-          f"{BOOTSTRAP_CI:.0%} CI [{lo:+.3f}, {hi:+.3f}]  net ${primary['pnl_usd'].sum():,.0f}")
-    daily = primary.groupby("session_date")["pnl_usd"].sum()
+    print(f"  n={len(tested)}  mean={tested['R'].mean():+.3f}R  "
+          f"{BOOTSTRAP_CI:.0%} CI [{lo:+.3f}, {hi:+.3f}]  net ${tested['pnl_usd'].sum():,.0f}")
+    daily = tested.groupby("session_date")["pnl_usd"].sum()
     print(f"  daily P&L: mean ${daily.mean():,.0f}  sd ${daily.std():,.0f}  "
           f"worst ${daily.min():,.0f}  win days {((daily>0).mean()):.0%}")
     eq = daily.cumsum()

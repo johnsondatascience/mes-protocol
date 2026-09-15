@@ -97,6 +97,10 @@ FRED_RELEASE_DATES_URL = "https://api.stlouisfed.org/fred/release/dates"
 FRED_MAX_LIMIT = 10000
 FRED_SERIES_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_OBSERVATIONS_MAX_LIMIT = 100000
+FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+FOMC_HISTORICAL_URL = "https://www.federalreserve.gov/monetarypolicy/fomchistorical{year}.htm"
+HTTP_TIMEOUT_S = 30
+HTTP_USER_AGENT = "mesproto/0.1 (research; +https://github.com/johnsondatascience/mes-protocol)"
 
 # --- SPY proxy point scaling (added 2026-09-15) -----------------------------
 # Setup thresholds are ES points. A SPY session multiplies every one of them by
@@ -104,10 +108,6 @@ FRED_OBSERVATIONS_MAX_LIMIT = 100000
 # S&P 500 index close stands in for ES: the two differ by well under 1%, at most
 # about one SPY cent on the widest threshold. FRED keeps 10 years of it.
 SPY_REFERENCE_SERIES = "SP500"
-FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
-FOMC_HISTORICAL_URL = "https://www.federalreserve.gov/monetarypolicy/fomchistorical{year}.htm"
-HTTP_TIMEOUT_S = 30
-HTTP_USER_AGENT = "mesproto/0.1 (research; +https://github.com/johnsondatascience/mes-protocol)"
 
 # exits filled by a stop order pay slippage_ticks_stop: a breakeven exit is a
 # moved stop being hit, so it pays too. Market (MANUAL) exits are not charged.
@@ -115,7 +115,11 @@ STOP_ORDER_EXITS = ("STOP", "BREAKEVEN")
 
 # --- statistical protocol -----------------------------------------------------
 MIN_EXPECTANCY_R = 0.15   # below this, not worth trading after costs
-N_SETUPS_TESTED = 5       # Bonferroni denominator
+N_SETUPS_TESTED = 5       # Bonferroni denominator: the protocol's five setups
+# Reported, never judged (decided 2026-09-15): outside the Bonferroni family,
+# no gate verdict, no confirmation claim, not in the portfolio. A promising
+# exploratory result needs its own pre-registered sample before it counts.
+EXPLORATORY_SETUPS = ("IB_FAIL",)
 ALPHA = 0.05 / N_SETUPS_TESTED
 ASSUMED_SIGMA_R = 1.5     # for planning only; the bootstrap uses the real thing
 BURN_IN_TRADES = 30       # per setup, flagged and INCLUDED in primary (amended 2026-09-15)

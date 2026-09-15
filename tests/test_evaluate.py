@@ -13,7 +13,9 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from mesproto.config import BURN_IN_TRADES, FUTILITY_GATES, MES
+from mesproto.config import (
+    ALPHA, BURN_IN_TRADES, EXPLORATORY_SETUPS, FUTILITY_GATES, MES, N_SETUPS_TESTED,
+)
 from mesproto.evaluate import (
     compute_r, futility_verdict, kill_threshold, primary_sample, report,
 )
@@ -268,6 +270,54 @@ def test_report_breaks_down_exclusions_by_condition():
     out = buf.getvalue()
     assert "delta_confirmed=None: 2" in out and "no_news_stand_down=None: 2" in out, out
     print("  " + "\n  ".join(ln for ln in out.splitlines() if "=None:" in ln))
+
+
+# --- exploratory setups (decided 2026-09-15) ---------------------------------
+
+def _report_text(log):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report(compute_r(log), min_exp=0.15, alpha=0.01, n_boot=200)
+    return buf.getvalue()
+
+
+def _section(out, setup):
+    start = out.index(f"--- {setup}")
+    nxt = [i for i in (out.find("\n---", start + 1), out.find("\n====", start + 1)) if i > 0]
+    return out[start:min(nxt)]
+
+
+def test_family_of_tested_setups_is_the_protocols_five():
+    """IB_FAIL is exploratory: it is not a sixth test, so alpha stays 0.05/5."""
+    assert "IB_FAIL" in EXPLORATORY_SETUPS
+    assert N_SETUPS_TESTED == 5 and abs(ALPHA - 0.01) < 1e-12
+    print(f"  tested family: {N_SETUPS_TESTED} setups, alpha {ALPHA}; exploratory: {EXPLORATORY_SETUPS}")
+
+
+def test_exploratory_setup_gets_no_verdict_or_confirmation_claim():
+    """An exploratory result is described, never judged: no gate verdict (a
+    PASS would read as a path to live capital) and no 'n to confirm'."""
+    good = list(_series(0.6, FUTILITY_GATES[0] + 10, seed=13))
+    tested = make_log(good, setup="VWAP_CONT")
+    explore = make_log(good, setup="IB_FAIL")
+    explore["trade_id"] += 1000
+    out = _report_text(pd.concat([tested, explore], ignore_index=True))
+    fail = _section(out, "IB_FAIL")
+    assert "EXPLORATORY" in fail, fail
+    assert "gate:" not in fail and "n to confirm" not in fail, fail
+    assert "gate:" in _section(out, "VWAP_CONT"), "tested setups keep their verdict"
+    print("  " + "\n  ".join(ln for ln in fail.splitlines() if "EXPLORATORY" in ln or "exploratory" in ln))
+
+
+def test_portfolio_counts_tested_setups_only():
+    tested = make_log([2.0, -1.0] * 5, setup="VWAP_CONT")
+    explore = make_log([2.0] * 8, setup="IB_FAIL")
+    explore["trade_id"] += 1000
+    out = _report_text(pd.concat([tested, explore], ignore_index=True))
+    portfolio = out[out.index("PORTFOLIO"):]
+    assert "n=10 " in portfolio, portfolio
+    assert "IB_FAIL" in portfolio and "n=8" in portfolio, "say what was left out"
+    print("  " + "\n  ".join(portfolio.splitlines()[:3]))
 
 
 def test_gate_counts_burn_in_trades():

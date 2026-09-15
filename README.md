@@ -17,7 +17,7 @@ identically.
 | Setup | Testable from bars? | How it is evaluated |
 |---|---|---|
 | S1 IB break and retest | Partly | `generate_s1`; delta condition needs TBBO |
-| IB_FAIL (S1's failed retest, traded the other way) | Yes | `generate_ib_fail` |
+| IB_FAIL (S1's failed retest, traded the other way) | Yes | `generate_ib_fail`; exploratory — reported, never judged |
 | S2 Value-area edge to VPOC | No | Manual replay — needs DOM resting size |
 | S3 VWAP pullback continuation | Yes | `generate_s3` |
 | S4 HVN absorption reversal | No | Manual replay — needs the book |
@@ -180,6 +180,9 @@ pinned to the protocol's §06 table, decided only at fixed checkpoints).
 - `checklist_ok=0` trades are excluded.
 - The futility gate is decided at n = 60 and n = 150 on the trades that existed
   at that checkpoint. A kill at 60 stays a kill.
+- IB_FAIL is exploratory (`EXPLORATORY_SETUPS`): its results are printed, but
+  it gets no gate verdict or confirmation size, is left out of the portfolio,
+  and is not one of the five setups in the alpha = 0.05 / 5 correction.
 - Logs are validated first: unknown direction/setup/grade, checklist flags other
   than 0/1, and stops on the wrong side of entry are errors.
 
