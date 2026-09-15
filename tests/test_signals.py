@@ -353,6 +353,37 @@ def test_s1_break_bar_itself_can_confirm_delta():
     print(f"  break-bar delta extreme confirmed at {sigs[0].signal_time.time()}")
 
 
+def _bar_at(bars, d, hh, mm):
+    return pd.Timestamp.combine(d, time(hh, mm)).tz_localize(ET)
+
+
+def test_s1_retest_fails_on_close_not_wick():
+    """Amended 2026-09-15: 'without closing back inside by more than 2 points'
+    is read on the close. A wick deeper inside that closes within 2 points is
+    still a retest that held — and the stop goes beyond that wick."""
+    d = S1_LOOKAHEAD_DATE
+    bars = s1_quick_retest_bars(break_delta=500.0,
+                                retest_deltas=[-50.0, -50.0, -50.0, -50.0, -50.0])
+    lv = {x.date: x for x in build_sessions(bars, tick=TICK)}[d]
+    edge = lv.ib_high
+    ts = _bar_at(bars, d, 10, 1)
+
+    wick = bars.copy()
+    wick.attrs.update(bars.attrs)
+    wick.loc[ts, "low"] = edge - 3.5                  # pokes 3.5 inside, closes above
+    sigs = generate_s1(wick, lv, MES)
+    assert sigs and sigs[0].signal_time == ts, [s.signal_time.time() for s in sigs]
+    assert abs(sigs[0].stop_px - (edge - 3.5 - 1.0)) < 1e-9, sigs[0].stop_px
+
+    closed = bars.copy()
+    closed.attrs.update(bars.attrs)
+    closed.loc[ts, ["low", "close"]] = [edge - 3.0, edge - 2.5]   # closes 2.5 inside
+    sigs = generate_s1(closed, lv, MES)
+    assert all(s.context["break_time"] != "10:00:00" for s in sigs), \
+        [(s.signal_time.time(), s.context["break_time"]) for s in sigs]
+    print(f"  wick 3.5 inside -> signal, stop {edge - 4.5:.2f}; close 2.5 inside -> break failed")
+
+
 def test_s1_one_signal_per_break():
     """Price sitting above the IB after a signal is the same break, not a new
     one. A break is a close crossing the edge from inside; re-arming on every

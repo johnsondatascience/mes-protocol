@@ -207,8 +207,10 @@ def generate_s1(
         else:
             retest_extreme = max(retest_extreme, bar["high"])
 
-        # failure: price re-entered the IB by more than the tolerance
-        reentry = (edge - bar["low"]) if direction == "LONG" else (bar["high"] - edge)
+        # failure: a bar CLOSED back inside the IB by more than the tolerance.
+        # A wick deeper inside that closes within it is a retest that held
+        # (amended 2026-09-15); the wick still sets the swing the stop goes beyond.
+        reentry = (edge - bar["close"]) if direction == "LONG" else (bar["close"] - edge)
         if reentry > S1_RETEST_MAX_REENTRY_PTS:
             state, direction = "WAITING", None
             continue
