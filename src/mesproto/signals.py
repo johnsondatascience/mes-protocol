@@ -48,10 +48,11 @@ from .config import (
     S1_NEWS_EVENTS, S1_NEWS_STAND_DOWN_UNTIL, S1_RETEST_MAX_REENTRY_PTS,
     S1_STOP_BEYOND_SWING_PTS,
     S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, S3_ENTRY_CUTOFF, S3_MAX_COUNTER_DELTA_FRAC,
-    S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS, S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS,
+    S3_LVN_MAX_FRAC_OF_POC, S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS, S3_STOP_CAP_PTS,
+    S3_STOP_FLOOR_PTS,
     S3_VA_EDGE_TOLERANCE_PTS, S3_VWAP_TOLERANCE_PTS, Contract,
 )
-from .levels import SessionLevels, rth_slice, running_crosses, volume_profile
+from .levels import Profile, SessionLevels, rth_slice, running_crosses, volume_profile
 from .news import NewsCalendar
 
 Direction = Literal["LONG", "SHORT"]
@@ -127,6 +128,24 @@ def _bar_delta(bars: pd.DataFrame) -> Optional[pd.Series]:
     if bars["buy_volume"].isna().all():
         return None
     return bars["buy_volume"] - bars["sell_volume"]
+
+
+def _low_volume_node(profile: Optional[Profile], anchor: float, sign: int, tick: float,
+                     furthest: float) -> Optional[float]:
+    """First price past `anchor`, moving against the trade, where under
+    S3_LVN_MAX_FRAC_OF_POC of the POC's volume has traded; None if there is
+    none out to `furthest`. Thin prices are where the market moved fast and
+    left no inventory, so price returning there has nothing to hold it."""
+    if profile is None:
+        return None
+    vols = {int(round(p / tick)): v for p, v in profile.bins.items()}
+    thin = S3_LVN_MAX_FRAC_OF_POC * max(vols.values())
+    k, last = int(round(anchor / tick)) - sign, int(round(furthest / tick))
+    while sign * (k - last) >= 0:
+        if vols.get(k, 0.0) < thin:
+            return k * tick
+        k -= sign
+    return None
 
 
 def _clamp_stop(entry: float, raw_stop: float, sign: int,
@@ -423,6 +442,11 @@ def generate_s3(
     value-area edge — the top of today's value for a long, the bottom for a
     short, from the session profile through that bar (amended 2026-09-15).
 
+    The stop sits 1 tick beyond the low-volume node under the pullback: the
+    first price past the pullback (and entry) where under
+    S3_LVN_MAX_FRAC_OF_POC of the busiest price's volume has traded today.
+    No node within S3_STOP_CAP_PTS is no trade (amended 2026-09-15).
+
     `entry_style` is pre-registered per the protocol: LIMIT at the level the
     pullback reached (VWAP when it reached both), or STOP beyond the pullback
     bar's extreme. Pick one and never mix within a sample.
@@ -457,15 +481,26 @@ def generate_s3(
     # for the first one) to the start of the current pullback
     last_touch_i = 0
     idx_all = rth.index
-    # A pullback comes back TO a level, so price must first have been away
-    # from it on the trend side. Without this, a steady climb whose developing
-    # value-area high rides at the session high "pulls back" without moving,
-    # and a pullback resting on VWAP re-signals every few bars. Reset after
-    # each signal: one signal per pullback.
-    away_vwap = away_edge = False
+    # A pullback is price coming back TO a level, so before this bar price must
+    # have been beyond where the level is NOW by more than the tolerance —
+    # measured from the open, or from the last signal. Without it, a steady
+    # climb whose value-area high rides at the session high "pulls back"
+    # without moving, a value area rising into a flat afternoon looks like a
+    # pullback, and a pullback resting on VWAP re-signals every few bars.
+    before = rth[rth.index < tradeable.index[0]]
+    run_extreme = np.nan if before.empty else \
+        float(before["high"].max() if direction == "LONG" else before["low"].min())
+
+    def came_back(level: Optional[float], probe: float, reached: float, tol: float) -> bool:
+        return (level is not None and not np.isnan(reached)
+                and sign * (reached - level) > tol and abs(probe - level) <= tol)
 
     for ts, bar in tradeable.iterrows():
         i = idx_all.get_loc(ts)
+        reached = run_extreme                # trend-side extreme of earlier bars
+        trend_side = bar["high"] if direction == "LONG" else bar["low"]
+        run_extreme = trend_side if np.isnan(run_extreme) else \
+            (max(run_extreme, trend_side) if direction == "LONG" else min(run_extreme, trend_side))
         if crosses[i] > S3_MAX_VWAP_CROSSES:
             break                            # stand down for the rest of the session
         v = vwap.iloc[i]
@@ -479,12 +514,8 @@ def generate_s3(
         va_edge = None if developing is None else \
             (developing.vah if direction == "LONG" else developing.val)
 
-        near_vwap = away_vwap and abs(probe - v) <= S3_VWAP_TOLERANCE_PTS
-        near_edge = away_edge and va_edge is not None \
-            and abs(probe - va_edge) <= S3_VA_EDGE_TOLERANCE_PTS
-        away_vwap = away_vwap or sign * (probe - v) > S3_VWAP_TOLERANCE_PTS
-        away_edge = away_edge or (va_edge is not None
-                                  and sign * (probe - va_edge) > S3_VA_EDGE_TOLERANCE_PTS)
+        near_vwap = came_back(float(v), probe, reached, S3_VWAP_TOLERANCE_PTS)
+        near_edge = came_back(va_edge, probe, reached, S3_VA_EDGE_TOLERANCE_PTS)
         near = near_vwap or near_edge
 
         if not near:
@@ -526,10 +557,17 @@ def generate_s3(
 
         pb_extreme = float(pullback["low"].min()) if direction == "LONG" \
             else float(pullback["high"].max())
-        raw_stop = pb_extreme - sign * contract.tick
-        if sign * (entry - raw_stop) <= 0:
-            raw_stop = entry - sign * S3_STOP_FLOOR_PTS
-        stop = _clamp_stop(entry, raw_stop, sign, S3_STOP_FLOOR_PTS, S3_STOP_CAP_PTS)
+        # "Beyond the low-volume node under the pullback": search from whichever
+        # of the pullback extreme and the entry is further from the trade, so the
+        # stop is always on the losing side of entry.
+        anchor = min(pb_extreme, entry) if direction == "LONG" else max(pb_extreme, entry)
+        node = _low_volume_node(developing, anchor, sign, contract.tick,
+                                furthest=entry - sign * (S3_STOP_CAP_PTS - contract.tick))
+        if node is None:
+            in_pullback = False              # nothing thin within the cap: no trade
+            continue
+        stop = _clamp_stop(entry, node - sign * contract.tick, sign,
+                           S3_STOP_FLOOR_PTS, S3_STOP_CAP_PTS)
         if stop is None:
             in_pullback = False
             continue
@@ -551,6 +589,7 @@ def generate_s3(
             context={
                 "vwap": float(v), "pullback_level": level,
                 "va_edge": None if va_edge is None else float(va_edge),
+                "low_volume_node": node,
                 "day_type": lv.day_type,
                 "ib_range_pts": lv.ib_range,
                 "otf_bars": max(lv.otf_up_bars, lv.otf_down_bars),
@@ -562,7 +601,7 @@ def generate_s3(
         ))
         in_pullback = False
         last_touch_i = i
-        away_vwap = away_edge = False        # price must leave before the next pullback
+        run_extreme = np.nan                 # price must leave again before the next pullback
     return out
 
 

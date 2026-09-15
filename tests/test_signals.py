@@ -76,16 +76,18 @@ def s3_path():
 
 def s3_volumes():
     v = np.full(390, 1500.0)
+    v[33:40] = 300.0         # a quick, thin climb through ~5062-5066: the low-volume node
     v[90:120] = 400.0        # declining volume on the pullback
     return v
 
 
-def s3_va_edge_path():
-    """Trend day that builds value 5060-5075 on heavy volume by 10:30, runs to
-    5100 on light volume, then pulls back to ~5076: inside 2 points of the
-    developing value-area high (~5074), but 6+ points above VWAP (~5069)."""
-    rise1 = np.linspace(5040, 5060, 10)                   # 09:30-09:40
-    value = np.linspace(5060, 5075, 50)                   # 09:40-10:30, heavy
+def s3_va_edge_path(value_from=5068.0):
+    """Trend day that builds value from `value_from` to 5075 on heavy volume by
+    10:30, runs to 5100 on light volume, then pulls back to ~5076: inside 2
+    points of the developing value-area high (~5075), but more than 2 points
+    above VWAP. The light climb below `value_from` is the low-volume node."""
+    rise1 = np.linspace(5040, value_from, 10)             # 09:30-09:40
+    value = np.linspace(value_from, 5075, 50)             # 09:40-10:30, heavy
     rise2 = np.linspace(5075, 5100, 30)                   # 10:30-11:00, light
     pull = np.concatenate([np.linspace(5100, 5077, 15), np.full(6, 5076.5)])
     cont = np.linspace(5077, 5130, 60)
@@ -741,6 +743,48 @@ def test_s3_pullback_to_developing_value_area_edge():
           f"VWAP {s.vwap.iloc[i]:.2f} -> LIMIT at {sig.entry_px:.2f}")
 
 
+def _first_thin_level_beyond(rth_through_signal, anchor, direction):
+    """Independent of production: walk tick by tick from `anchor` away from
+    the trade until a level has under S3_LVN_MAX_FRAC_OF_POC of the POC's volume."""
+    from mesproto.config import S3_LVN_MAX_FRAC_OF_POC
+    from mesproto.levels import volume_profile
+    prof = volume_profile(rth_through_signal, tick=TICK)
+    vols = {int(round(p / TICK)): v for p, v in prof.bins.items()}
+    step = -1 if direction == "LONG" else 1
+    k = int(round(anchor / TICK)) + step
+    while vols.get(k, 0.0) >= S3_LVN_MAX_FRAC_OF_POC * max(vols.values()):
+        k += step
+    return k * TICK
+
+
+def test_s3_stop_goes_beyond_the_low_volume_node():
+    """§05: 'Beyond the low-volume node under the pullback.' The node is the
+    first price past the pullback (and entry) where under 25% as much has
+    traded today as at the busiest price; the stop sits 1 tick beyond it."""
+    from mesproto.levels import rth_slice
+    bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
+    sig = generate_s3(bars, lv[d1], MES)[0]
+    rth = rth_slice(bars, d1)
+    i = rth.index.get_loc(sig.signal_time)
+    pullback_low = rth["low"].iloc[rth.index.get_loc(sig.signal_time.replace(hour=11, minute=0)):i + 1].min()
+    assert pullback_low >= sig.entry_px, "fixture: the pullback stays above the VWAP limit"
+    node = _first_thin_level_beyond(rth.iloc[:i + 1], sig.entry_px, "LONG")
+    assert abs(sig.stop_px - (node - TICK)) < 1e-9, (sig.stop_px, node)
+    assert 5.0 <= sig.risk_pts <= 10.0, sig.risk_pts
+    print(f"  entry {sig.entry_px:.2f}, low-volume node {node:.2f} -> stop {sig.stop_px:.2f} "
+          f"({sig.risk_pts:.2f} pts)")
+
+
+def test_s3_no_low_volume_node_within_cap_is_no_trade():
+    """Value built all the way down 5060-5075: nothing thin within 10 points of
+    a 5074 entry. Structure beyond the cap is no trade, never a widened stop."""
+    bars, lv, d1 = build_two_days(s3_va_edge_path(value_from=5060.0),
+                                  day2_vol=s3_va_edge_volumes(), day2_on=5040.0)
+    assert lv[d1].s3_gate() is True
+    assert generate_s3(bars, lv[d1], MES) == []
+    print("  nearest thin price ~15 pts below entry -> no trade")
+
+
 def test_s3_price_already_at_a_level_is_not_a_pullback():
     """On a steady climb the developing value-area high sits at the session
     high. A bar there has not pulled back to anything: price must first be
@@ -763,6 +807,18 @@ def s3_hug_bars():
     vol[90:115] = 400.0
     vol[115:140] = 150.0
     return build_two_days(path, day2_vol=vol, day2_on=5040.0)
+
+
+def test_s3_level_rising_to_meet_price_is_not_a_pullback():
+    """After 12:10 price sits flat at 5130 and the developing value-area high
+    climbs up to it. Price never came back to the level — the level came to
+    price — so the afternoon gives no signal."""
+    bars, lv, d1 = build_two_days(s3_va_edge_path(value_from=5060.0),
+                                  day2_vol=s3_va_edge_volumes(), day2_on=5040.0)
+    late = [(s.signal_time.time(), s.context["pullback_level"], s.entry_px)
+            for s in generate_s3(bars, lv[d1], MES) if s.signal_time.time() >= time(12, 10)]
+    assert late == [], late
+    print("  flat afternoon, VAH rising into price -> no signal")
 
 
 def test_s3_one_signal_per_pullback():
