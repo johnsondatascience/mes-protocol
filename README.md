@@ -189,6 +189,9 @@ pinned to the protocol's §06 table, decided only at fixed checkpoints).
 - `checklist_ok=0` trades are excluded.
 - The futility gate is decided at n = 60 and n = 150 on the trades that existed
   at that checkpoint. A kill at 60 stays a kill.
+- Trades from `VALIDATION_PERIODS` (ES, 2026-07-30 to 2026-08-31) are dropped
+  before anything else: that month validated the tooling and was read trade by
+  trade, so its sessions belong to no sample. The report names them.
 - IB_FAIL is exploratory (`EXPLORATORY_SETUPS`): its results are printed, but
   it gets no gate verdict or confirmation size, is left out of the portfolio,
   and is not one of the five setups in the alpha = 0.05 / 5 correction.

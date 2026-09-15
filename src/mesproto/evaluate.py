@@ -73,6 +73,7 @@ from .config import (
     CONFIRM_N_MIN_SIGMA_R, CONFIRM_POWER, CONTRACTS, DAY_TYPE_MIN_TRADES,
     EXPLORATORY_SETUPS, FUTILITY_GATES, GAP_OPEN_PCT, GATE_CONFIDENCE,
     GATE_SIGMA_FLOOR_R, MIN_EXPECTANCY_R, PRICE_EPS, STOP_ORDER_EXITS,
+    VALIDATION_PERIODS,
 )
 from .schema import validate
 
@@ -154,9 +155,12 @@ def primary_sample(df: pd.DataFrame, burn_in: int = BURN_IN_TRADES
     """
     ordered = chronological(df).copy()
     ordered["burn_in"] = (ordered.groupby("setup").cumcount() < burn_in).to_numpy()
-    ok = (ordered["checklist_ok"] == 1).to_numpy()
+    days = pd.to_datetime(ordered["session_date"]).dt.date
+    validation = days.map(lambda d: any(a <= d <= b for a, b, _ in VALIDATION_PERIODS)).to_numpy()
+    ok = (ordered["checklist_ok"] == 1).to_numpy() & ~validation
     info = {"burn_in": int((ordered["burn_in"].to_numpy() & ok).sum()),
-            "off_checklist": int((~ok).sum())}
+            "off_checklist": int(((ordered["checklist_ok"] != 1).to_numpy() & ~validation).sum()),
+            "validation": int(validation.sum())}
     return ordered[ok], info
 
 
@@ -261,6 +265,11 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
               f"evaluate them separately.")
 
     primary, info = primary_sample(df, burn_in)
+    if info["validation"]:
+        print(f"\n!! {info['validation']} trades fall in validation-only periods and are "
+              f"excluded from\n   everything below:")
+        for start, end, why in VALIDATION_PERIODS:
+            print(f"     {start} .. {end}: {why}")
     if info["burn_in"]:
         print(f"\n!! {info['burn_in']} trades are burn-in (the first {burn_in} of each "
               f"setup). They are INCLUDED in\n   the primary analysis and flagged "

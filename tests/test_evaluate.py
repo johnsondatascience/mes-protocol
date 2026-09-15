@@ -15,6 +15,7 @@ import pandas as pd
 
 from mesproto.config import (
     ALPHA, BURN_IN_TRADES, EXPLORATORY_SETUPS, FUTILITY_GATES, MES, N_SETUPS_TESTED,
+    VALIDATION_PERIODS,
 )
 from mesproto.evaluate import (
     compute_r, futility_verdict, kill_threshold, primary_sample, report,
@@ -126,7 +127,7 @@ def test_burn_in_counts_off_checklist_trades():
     primary, info = primary_sample(compute_r(log))
     assert len(primary) == BURN_IN_TRADES + 4 - 10, len(primary)
     assert int(primary["burn_in"].sum()) == BURN_IN_TRADES - 10, primary["burn_in"].sum()
-    assert info == {"burn_in": BURN_IN_TRADES - 10, "off_checklist": 10}, info
+    assert info == {"burn_in": BURN_IN_TRADES - 10, "off_checklist": 10, "validation": 0}, info
     print(f"  {info}")
 
 
@@ -285,6 +286,25 @@ def _section(out, setup):
     start = out.index(f"--- {setup}")
     nxt = [i for i in (out.find("\n---", start + 1), out.find("\n====", start + 1)) if i > 0]
     return out[start:min(nxt)]
+
+
+def test_validation_period_trades_never_reach_the_primary_sample():
+    """August 2026 ES was the run that validated the pipeline and was read
+    trade by trade; the rules were settled after seeing it, so it is declared
+    validation-only up front and can never be pooled with the study sample."""
+    assert VALIDATION_PERIODS, "the validation month is declared in config"
+    start, end, why = VALIDATION_PERIODS[0]
+    assert (start, end) == (date(2026, 7, 30), date(2026, 8, 31)) and why
+    inside = make_log([2.0] * 6, start=date(2026, 8, 3))
+    outside = make_log([2.0] * 4, start=date(2026, 9, 21))
+    outside["trade_id"] += 1000
+    primary, info = primary_sample(compute_r(pd.concat([inside, outside], ignore_index=True)))
+    assert len(primary) == 4 and info["validation"] == 6, (len(primary), info)
+    assert primary["session_date"].min().date() >= date(2026, 9, 21)
+
+    out = _report_text(pd.concat([inside, outside], ignore_index=True))
+    assert "validation" in out.lower() and "6 trades" in out, out
+    print("  " + next(ln for ln in out.splitlines() if "validation" in ln.lower()))
 
 
 def test_family_of_tested_setups_is_the_protocols_five():

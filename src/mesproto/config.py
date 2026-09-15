@@ -121,6 +121,14 @@ N_SETUPS_TESTED = 5       # Bonferroni denominator: the protocol's five setups
 # exploratory result needs its own pre-registered sample before it counts.
 EXPLORATORY_SETUPS = ("IB_FAIL",)
 ALPHA = 0.05 / N_SETUPS_TESTED
+# Sessions used to validate the tooling and read trade by trade. Rules were
+# settled after seeing them, so they can never be part of a study sample:
+# primary_sample drops them and the report says so. (start, end, why)
+VALIDATION_PERIODS = (
+    (date(2026, 7, 30), date(2026, 8, 31),
+     "ES (ESU6) August 2026: first real-data run; inspected trade by trade, and "
+     "the one-order-per-edge and one-position-per-setup rules came out of it"),
+)
 ASSUMED_SIGMA_R = 1.5     # for planning only; the bootstrap uses the real thing
 BURN_IN_TRADES = 30       # per setup, flagged and INCLUDED in primary (amended 2026-09-15)
 FUTILITY_GATES = (60, 150)  # checkpoints at which the kill rule is applied
