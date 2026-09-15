@@ -134,6 +134,8 @@ CONFIRM_N_MIN_EFFECT_R = 0.05   # floor on the effect used for "n to confirm"
 CONFIRM_N_MIN_SIGMA_R = 1.0     # floor on the sigma used for "n to confirm"
 DAY_TYPE_MIN_TRADES = 5         # smallest day-type bucket worth printing
 OFF_CHECKLIST_WARN_FRAC = 0.25  # validate() warns above this share of checklist_ok=0
+AGGRESSOR_MIN_AGREEMENT = 0.95  # side codes must match the quotes on this share of
+AGGRESSOR_MIN_CLASSIFIED = 1000  # at least this many at-bid/at-ask trades before delta is trusted
 GAP_OPEN_PCT = 0.01             # |open / prior close - 1| beyond this is a gap-open session:
                                 # a different regime, reported separately but INCLUDED
                                 # in the primary sample (amended 2026-09-15)

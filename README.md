@@ -140,7 +140,16 @@ in `FRED_API_KEY` or `.env`.
 Databento marks `side` as the **initiating** order's side: `A` (ask) is a sell
 aggressor. `load_databento_tbbo(sell_aggressor_code=...)` exposes it because an
 inverted convention flips the sign of every delta conclusion in the protocol.
-Check one session against Optimus Flow before running a study on it.
+`run_pipeline.py` checks it from the tape itself: TBBO carries the best bid and
+offer at each trade, so trades at the ask must carry the buy code and trades at
+the bid the sell code (`aggressor_convention`). The run stops unless they agree
+on at least 95% of 1,000+ such trades. Comparing one session against Optimus
+Flow is still a good second check.
+
+Downloads are billed. `run_pipeline.py --databento` streams the raw file to
+`data/tbbo_<symbol>_<start>_<end>.dbn.zst` (or `--dbn PATH`) and reads that file
+on every later run instead of requesting it again. Price a request first with
+`databento.Historical().metadata.get_cost(...)`, which is free.
 
 Trades with side `N` (no aggressor — auctions, some opening prints) count toward
 volume but not delta. Bars are timed by `ts_event`, not the `ts_recv` index that

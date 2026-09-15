@@ -224,6 +224,116 @@ def _tbbo_frame(rows):
     return df.set_index("ts_recv")
 
 
+def _tbbo_quotes(rows):
+    """rows: (ts_event, price, side, bid, ask) — TBBO carries the BBO at each trade."""
+    df = pd.DataFrame(rows, columns=["ts_event", "price", "side", "bid_px_00", "ask_px_00"])
+    df["ts_event"] = pd.to_datetime(df["ts_event"], utc=True)
+    df["size"], df["instrument_id"] = 1, 1
+    return df.set_index("ts_event", drop=False)
+
+
+def test_aggressor_convention_is_read_from_the_quotes():
+    """A trade at the ask was a buyer lifting it; at the bid, a seller hitting
+    it. The side codes on those trades say which letter means sell — checked
+    from the data itself, before any delta condition is trusted."""
+    from mesproto.levels import aggressor_convention
+    t = "2026-08-03 14:30:00"
+    rows = [(t, 5000.25, "B", 5000.00, 5000.25)] * 60 \
+        + [(t, 5000.00, "A", 5000.00, 5000.25)] * 40 \
+        + [(t, 5000.25, "A", 5000.00, 5000.25)] * 2 \
+        + [(t, 5000.10, "N", 5000.00, 5000.25)] * 5      # inside the spread: unclassifiable
+    got = aggressor_convention(_tbbo_quotes(rows))
+    assert got["sell_aggressor_code"] == "A" and got["classified"] == 102, got
+    assert abs(got["agreement"] - 100 / 102) < 1e-12, got
+
+    flipped = [(ts, px, {"A": "B", "B": "A"}.get(s, s), b, a) for ts, px, s, b, a in rows]
+    assert aggressor_convention(_tbbo_quotes(flipped))["sell_aggressor_code"] == "B"
+    print(f"  {got}")
+
+
+def test_aggressor_problem_blocks_a_contradicted_or_thin_check():
+    from mesproto.config import AGGRESSOR_MIN_AGREEMENT, AGGRESSOR_MIN_CLASSIFIED
+    from mesproto.levels import aggressor_problem
+    ok = {"sell_aggressor_code": "A", "agreement": 0.999, "classified": 50_000}
+    assert aggressor_problem(ok, "A") is None
+    assert "B" in aggressor_problem({**ok, "sell_aggressor_code": "B"}, "A")
+    assert aggressor_problem({**ok, "agreement": AGGRESSOR_MIN_AGREEMENT - 0.01}, "A")
+    assert aggressor_problem({**ok, "classified": AGGRESSOR_MIN_CLASSIFIED - 1}, "A")
+    assert aggressor_problem(None, "A"), "a tape that was never checked is not a pass"
+    print("  wrong code, low agreement, too few trades, or no check -> blocked")
+
+
+class _FakeStore:
+    def __init__(self, df, symbols):
+        self._df, self.symbols = df, symbols
+
+    def to_df(self):
+        return self._df
+
+
+def _fake_databento(df, calls):
+    import types
+
+    class Historical:
+        def __init__(self, key=None):
+            calls.append("client")
+            self.timeseries = types.SimpleNamespace(get_range=self._get_range)
+
+        @staticmethod
+        def _get_range(**kw):
+            calls.append(("get_range", kw))
+            if kw.get("path"):
+                open(kw["path"], "wb").write(b"dbn")
+            return _FakeStore(df, [kw["symbols"]])
+
+    class DBNStore:
+        @staticmethod
+        def from_file(path):
+            calls.append(("from_file", str(path)))
+            return _FakeStore(df, ["ESU6"])
+
+    return types.SimpleNamespace(Historical=Historical, DBNStore=DBNStore)
+
+
+def test_databento_download_is_saved_and_never_bought_twice():
+    """A TBBO month costs real money. The first call streams it to `path`;
+    any later call with that path reads the file and makes no request."""
+    import os
+    import sys
+    import tempfile
+    from mesproto.levels import load_databento_tbbo
+    t = "2026-08-03 14:30:00"
+    df = _tbbo_quotes([(t, 5000.25, "B", 5000.00, 5000.25), (t, 5000.00, "A", 5000.00, 5000.25)])
+    calls: list = []
+    saved = sys.modules.get("databento")
+    sys.modules["databento"] = _fake_databento(df, calls)
+    path = os.path.join(tempfile.mkdtemp(), "esu6.dbn.zst")
+    try:
+        first = load_databento_tbbo(symbols="ESU6", start="2026-08-03", end="2026-08-04", path=path)
+        assert [c[0] for c in calls if isinstance(c, tuple)] == ["get_range"], calls
+        assert calls[-1][1]["path"] == path and os.path.isfile(path)
+        assert first.attrs["aggressor_check"]["sell_aggressor_code"] == "A"
+
+        calls.clear()
+        again = load_databento_tbbo(symbols="ESU6", start="2026-08-03", end="2026-08-04", path=path)
+        assert calls == [("from_file", path)], "a saved download must not be requested again"
+        assert len(again) == len(first)
+
+        try:
+            load_databento_tbbo(symbols="ESZ6", start="2026-08-03", end="2026-08-04", path=path)
+        except ValueError as e:
+            assert "ESZ6" in str(e), e
+        else:
+            raise AssertionError("a saved file for another contract must not be reused")
+    finally:
+        if saved is None:
+            sys.modules.pop("databento", None)
+        else:
+            sys.modules["databento"] = saved
+        os.remove(path)
+    print("  first call downloads to disk; second reads the file; wrong contract refused")
+
+
 def test_tbbo_unsided_trades_are_not_buys():
     """Databento marks side N where the source gives none (auctions, some
     opening prints). Counting those as buy aggression biases every delta up."""

@@ -34,6 +34,7 @@ from __future__ import annotations
 import re
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 from datetime import date, time, timedelta
 from typing import Iterable, Literal, Mapping, Optional, Sequence
 
@@ -43,7 +44,8 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 
 from .config import (
-    DAY_TYPE_CUTOFF, DOUBLE_DIST_RANGE_MULT, ET, IB_END, ON_OPEN,
+    AGGRESSOR_MIN_AGREEMENT, AGGRESSOR_MIN_CLASSIFIED, DAY_TYPE_CUTOFF,
+    DOUBLE_DIST_RANGE_MULT, ET, IB_END, ON_OPEN,
     OTF_BAR_MINUTES, RTH_CLOSE, RTH_OPEN, S1_IB_RANGE_MAX_PCT,
     S1_IB_RANGE_MIN_PCT, S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS,
     S5_ON_EXTREME_PCT, VALUE_AREA_PCT,
@@ -242,6 +244,7 @@ def load_databento_tbbo(
     bar_minutes: int = 1,
     api_key: Optional[str] = None,
     sell_aggressor_code: str = "A",
+    path: Optional[str] = None,
 ) -> pd.DataFrame:
     """Pull TBBO from Databento and aggregate to signed OHLCV bars.
 
@@ -260,6 +263,14 @@ def load_databento_tbbo(
 
     The symbol is checked by `databento_symbology` *before* any request is
     made, so a request that would corrupt the tape never costs money.
+
+    `path`: where the raw DBN download is kept. If the file already exists it
+    is read instead of requested — a download is paid for once. A saved file
+    for a different symbol is refused rather than silently reused.
+
+    The returned bars carry attrs["aggressor_check"] from
+    `aggressor_convention`, so the caller can confirm the side codes against
+    the quotes before trusting any delta condition.
     """
     symbol, stype_in = databento_symbology(symbols)
     try:
@@ -267,16 +278,73 @@ def load_databento_tbbo(
     except ImportError:
         raise ImportError("pip install databento")
 
-    client = db.Historical(api_key) if api_key else db.Historical()
-    data = client.timeseries.get_range(
-        dataset=dataset, schema="tbbo", symbols=symbol, stype_in=stype_in,
-        start=start, end=end,
-    )
+    if path is not None and Path(path).is_file():
+        data = db.DBNStore.from_file(path)
+        if symbol not in (data.symbols or []):
+            raise ValueError(f"{path} holds {data.symbols}, not {symbol} — pass another path")
+    else:
+        client = db.Historical(api_key) if api_key else db.Historical()
+        data = client.timeseries.get_range(
+            dataset=dataset, schema="tbbo", symbols=symbol, stype_in=stype_in,
+            start=start, end=end, path=path,
+        )
     trades = data.to_df()
     if trades.empty:
         raise ValueError("Databento returned no trades for that range/symbol")
-    return tbbo_to_bars(trades, bar_minutes=bar_minutes,
+    bars = tbbo_to_bars(trades, bar_minutes=bar_minutes,
                         sell_aggressor_code=sell_aggressor_code)
+    bars.attrs["aggressor_check"] = aggressor_convention(trades)
+    return bars
+
+
+def aggressor_convention(trades: pd.DataFrame) -> dict:
+    """Which side code means a sell aggressor, read from the quotes in the tape.
+
+    TBBO records carry the best bid and offer just before each trade. A trade
+    at or through the ask was a buyer lifting it; at or through the bid, a
+    seller hitting it. Trades inside the spread, on a locked or crossed book,
+    or with side 'N' are not classified. Returns the inferred sell-aggressor
+    code ('A' or 'B', None if nothing was classifiable), the share of
+    classified trades consistent with it, and how many were classified.
+    """
+    def fixed_to_float(s: pd.Series) -> pd.Series:
+        s = s.astype(float)
+        return s / 1e9 if s.median() > 1e6 else s
+
+    px = fixed_to_float(trades["price"])
+    bid, ask = fixed_to_float(trades["bid_px_00"]), fixed_to_float(trades["ask_px_00"])
+    side = trades["side"].astype(str)
+    sided = side.isin(["A", "B"]) & (bid < ask)
+    at_ask, at_bid = sided & (px >= ask), sided & (px <= bid)
+    classified = int(at_ask.sum() + at_bid.sum())
+    if classified == 0:
+        return {"sell_aggressor_code": None, "agreement": None, "classified": 0}
+    sell = side[at_bid].value_counts()
+    sell_code = sell.idxmax() if len(sell) else ("A" if (side[at_ask] == "B").mean() >= 0.5 else "B")
+    buy_code = "B" if sell_code == "A" else "A"
+    agree = int((side[at_ask] == buy_code).sum() + (side[at_bid] == sell_code).sum())
+    return {"sell_aggressor_code": sell_code, "agreement": agree / classified,
+            "classified": classified}
+
+
+def aggressor_problem(check: Optional[dict], sell_aggressor_code: str) -> Optional[str]:
+    """Why the delta sign cannot be trusted, or None if the check passed.
+
+    An inverted side convention flips every delta condition in the protocol,
+    so anything short of a clear, well-populated agreement is a stop.
+    """
+    if not check or check.get("sell_aggressor_code") is None:
+        return "the tape has no trades at the bid or ask to check the side codes against"
+    if check["classified"] < AGGRESSOR_MIN_CLASSIFIED:
+        return (f"only {check['classified']} trades at the bid or ask — too few to "
+                f"confirm the side codes (need {AGGRESSOR_MIN_CLASSIFIED})")
+    if check["sell_aggressor_code"] != sell_aggressor_code:
+        return (f"the quotes say sell aggressors are marked {check['sell_aggressor_code']!r}, "
+                f"but bars were built with {sell_aggressor_code!r}: every delta would be inverted")
+    if check["agreement"] < AGGRESSOR_MIN_AGREEMENT:
+        return (f"side codes match the quotes on only {check['agreement']:.1%} of trades "
+                f"(need {AGGRESSOR_MIN_AGREEMENT:.0%})")
+    return None
 
 
 # ---------------------------------------------------------------------------

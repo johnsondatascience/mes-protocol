@@ -4,14 +4,17 @@
     # from a CSV of 1-minute bars (SPY proxy or exported futures bars)
     python scripts/run_pipeline.py --csv data/spy_1min.csv --contract SPY
 
-    # from Databento TBBO (needs DATABENTO_API_KEY)
-    python scripts/run_pipeline.py --databento ESZ5 \
-        --start 2025-10-01 --end 2025-10-31 --contract MES
+    # from Databento TBBO (DATABENTO_API_KEY in the environment or .env). The
+    # download is saved under data/ and re-read on later runs, never re-bought;
+    # the run stops unless the side codes are confirmed against the quotes.
+    python scripts/run_pipeline.py --databento ESU6 \
+        --start 2026-07-30T22:00 --end 2026-08-31T21:00 --contract MES
 
 Writes data/generated_trades.csv and prints the evaluation report.
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -24,7 +27,9 @@ from mesproto import (  # noqa: E402
 )
 from mesproto.config import ALPHA, BURN_IN_TRADES, MIN_EXPECTANCY_R  # noqa: E402
 from mesproto.evaluate import compute_r, report  # noqa: E402
+from mesproto.levels import aggressor_problem  # noqa: E402
 from mesproto.signals import run_all  # noqa: E402
+from mesproto.sources import read_api_key  # noqa: E402
 
 
 def main() -> int:
@@ -47,6 +52,13 @@ def main() -> int:
     ap.add_argument("--reference-closes", metavar="PATH", default="data/sp500_close.csv",
                     help="SPY only: S&P 500 daily closes from scripts/fetch_reference_closes.py, "
                          "used to scale ES-point thresholds by the prior day's ratio")
+    ap.add_argument("--dbn", metavar="PATH",
+                    help="where the raw Databento download is kept; an existing file is "
+                         "read instead of re-bought (default: data/tbbo_<symbol>_<start>_<end>.dbn.zst)")
+    ap.add_argument("--sell-aggressor-code", default="A", choices=["A", "B"],
+                    help="Databento side code for a sell aggressor; checked against the quotes")
+    ap.add_argument("--env-file", default=".env",
+                    help="read DATABENTO_API_KEY from here if it is not in the environment")
     ap.add_argument("--contracts", type=int, default=1)
     ap.add_argument("--burn-in", type=int, default=BURN_IN_TRADES,
                     help="burn-in trades per setup, flagged (not excluded), applied uniformly")
@@ -60,8 +72,23 @@ def main() -> int:
         source = "SPY" if args.contract == "SPY" else "FUTURES"
         bars = load_csv_bars(args.csv, source=source, tz=args.tz)
     else:
-        bars = load_databento_tbbo(symbols=args.databento, start=args.start,
-                                   end=args.end)
+        dbn = args.dbn or str(Path("data") / re.sub(
+            r"[^A-Za-z0-9_.-]", "", f"tbbo_{args.databento}_{args.start}_{args.end}.dbn.zst"))
+        print(("reading saved download " if Path(dbn).is_file()
+               else "downloading (billed by Databento) to ") + dbn)
+        Path(dbn).parent.mkdir(parents=True, exist_ok=True)
+        key = read_api_key(Path(args.env_file), name="DATABENTO_API_KEY") or None
+        bars = load_databento_tbbo(symbols=args.databento, start=args.start, end=args.end,
+                                   api_key=key, path=dbn,
+                                   sell_aggressor_code=args.sell_aggressor_code)
+        check = bars.attrs.get("aggressor_check")
+        problem = aggressor_problem(check, args.sell_aggressor_code)
+        if problem:
+            print(f"\nSTOP: delta sign not confirmed — {problem}.")
+            return 1
+        print(f"side codes confirmed against the quotes: sell aggressor = "
+              f"{check['sell_aggressor_code']!r} on {check['agreement']:.2%} of "
+              f"{check['classified']:,} trades at the bid or ask")
 
     is_spy = bars.attrs.get("source") == "SPY"
     reference = None
