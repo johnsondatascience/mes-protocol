@@ -181,6 +181,37 @@ def test_report_includes_burn_in_and_names_the_gate():
                              if "gate" in line or "burn" in line))
 
 
+def test_report_shows_gap_open_sessions_separately():
+    """Amended 2026-09-15: gap-open sessions are in the primary sample, and
+    the report shows how they did on their own — a different regime."""
+    log = make_log([2.0, -1.0] * 10)
+    log["gap_pct"] = 0.001
+    log.loc[:5, "gap_pct"] = [0.02, -0.015, 0.02, -0.015, 0.02, -0.015]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report(compute_r(log), min_exp=0.15, alpha=0.01, n_boot=200)
+    out = buf.getvalue()
+    assert "n=20 " in out, "gap-open trades stay in the primary sample"
+    line = next((ln for ln in out.splitlines() if "gap-open" in ln and "n=" in ln), None)
+    assert line is not None and "n=6 " in line, out
+    print(f" {line}")
+
+
+def test_report_breaks_down_exclusions_by_condition():
+    log = make_log([1.0] * 6)
+    log["failed_checks"] = ""
+    log.loc[:2, "checklist_ok"] = 0
+    log.loc[:2, "failed_checks"] = ["delta_confirmed=None",
+                                    "delta_confirmed=None;no_news_stand_down=None",
+                                    "no_news_stand_down=None"]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        report(compute_r(log), min_exp=0.15, alpha=0.01, n_boot=200)
+    out = buf.getvalue()
+    assert "delta_confirmed=None: 2" in out and "no_news_stand_down=None: 2" in out, out
+    print("  " + "\n  ".join(ln for ln in out.splitlines() if "=None:" in ln))
+
+
 def test_gate_counts_burn_in_trades():
     """With burn-in included, the first checkpoint is reached at 60 trades in
     total, not 60 after burn-in."""

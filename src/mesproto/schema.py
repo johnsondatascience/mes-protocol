@@ -22,13 +22,13 @@ EXIT_REASONS = ("TARGET", "STOP", "TIME", "MANUAL", "BREAKEVEN")
 DAY_TYPES = ("TREND_UP", "TREND_DOWN", "BALANCE", "DOUBLE_DIST", "UNCLASSIFIED")
 DIRECTIONS = ("LONG", "SHORT")
 GRADES = ("A", "B", "C")
-OPTIONAL_COLUMNS = ("notes", "source")
+OPTIONAL_COLUMNS = ("notes", "source", "gap_pct", "failed_checks")
 
 COLUMNS = [
     "trade_id", "session_date", "setup", "direction", "entry_time",
     "entry_px", "stop_px", "exit_px", "exit_reason", "contracts",
-    "day_type", "ib_range_pts", "on_range_pos", "checklist_ok", "grade",
-    "source", "notes",
+    "day_type", "ib_range_pts", "on_range_pos", "gap_pct", "checklist_ok",
+    "failed_checks", "grade", "source", "notes",
 ]
 
 
@@ -129,13 +129,14 @@ def fills_to_log(fills: Sequence[Fill], contract: Contract, contracts: int = 1,
             "day_type": s.context.get("day_type", "UNCLASSIFIED"),
             "ib_range_pts": s.context.get("ib_range_pts"),
             "on_range_pos": s.context.get("on_range_pos"),
+            "gap_pct": s.context.get("gap_pct"),
             "checklist_ok": int(s.checklist_ok),
+            # which conditions kept the trade out, so the report can say why
+            "failed_checks": ";".join(
+                f"{k}={v}" for k, v in s.checklist.items() if v is not True),
             "grade": "A",   # generated trades have no execution quality to grade
             "source": source,
-            "notes": "|".join(part for part in (
-                "ambiguous_bar" if f.ambiguous_bar else "",
-                ";".join(f"{k}={v}" for k, v in s.checklist.items() if v is not True),
-            ) if part),
+            "notes": "ambiguous_bar" if f.ambiguous_bar else "",
         })
         tid += 1
     return pd.DataFrame(rows, columns=COLUMNS)

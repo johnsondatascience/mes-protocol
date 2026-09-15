@@ -362,7 +362,7 @@
         <dt>Entry</dt><dd>Limit at the IB edge ± 1 tick, on the retest only. No chasing the initial break.</dd>
         <dt>Stop</dt><dd>1 point beyond the retest swing. Floor 4 pts, cap 8 pts — if structure demands more than 8, stand down.</dd>
         <dt>Target</dt><dd>Mechanical series: 2R. Managed: half at 1R, runner to IB edge + 1.0 × IB range or a session VWAP break.</dd>
-        <dt>Stand down</dt><dd>FOMC / CPI / NFP days before 10:30 ET. Gap opens beyond 1% of prior close — log separately, different regime.</dd>
+        <dt>Stand down</dt><dd>FOMC / CPI / NFP days before 10:30 ET. Gap opens beyond 1% of prior close are a different regime — traded and flagged, and reported separately (amended — see §09).</dd>
       </dl>
     </div>
     <div class="fail"><b>Known failure mode</b>The false break that reverses back through the entire IB. Log those as <code>IB_FAIL</code> with the same schema — the mirror trade may carry more edge than the setup itself, and you'll only find out if you record it.</div>
@@ -518,6 +518,7 @@ python mes_replay_eval.py trades.csv --min-expectancy 0.15 --alpha 0.01
       <thead><tr><th>Date</th><th>Change</th><th>Samples restarted</th></tr></thead>
       <tbody>
         <tr><td class="mono-c">2026-09-15</td><td>Burn-in trades (the first 30 of each setup) are included in the primary analysis and flagged, not excluded. The report also shows each setup without them. Gate checkpoints count burn-in trades, so n = 60 arrives 30 trades sooner.</td><td>All setups — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>S1 sessions that open more than 1% away from the prior close are no longer excluded. The trades are kept, the gap is logged in <code>gap_pct</code>, and the report shows gap-open sessions on their own line.</td><td>S1 — none collected yet</td></tr>
       </tbody>
     </table>
   </div>

@@ -59,7 +59,7 @@ from scipy.stats import norm
 from .config import (
     ALPHA, BOOTSTRAP_CI, BURN_IN_TRADES, CONFIRM_N_MIN_EFFECT_R,
     CONFIRM_N_MIN_SIGMA_R, CONFIRM_POWER, CONTRACTS, DAY_TYPE_MIN_TRADES,
-    FUTILITY_GATES, GATE_CONFIDENCE,
+    FUTILITY_GATES, GAP_OPEN_PCT, GATE_CONFIDENCE,
     GATE_SIGMA_FLOOR_R, MES, MIN_EXPECTANCY_R, Contract,
 )
 from .schema import validate
@@ -247,6 +247,14 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
               f"checklist_ok=0. These are excluded from the\n   primary analysis — "
               f"they measure discipline (or, for generated trades, a\n   condition the "
               f"data could not verify), not the setup.")
+        if "failed_checks" in df.columns:
+            reasons = (df.loc[df["checklist_ok"] == 0, "failed_checks"].fillna("")
+                       .astype(str).str.split(";").explode())
+            reasons = reasons[reasons != ""].value_counts()
+            if len(reasons):
+                print("   excluded by condition (a trade can fail more than one):")
+                for name, count in reasons.items():
+                    print(f"     {name}: {count}")
 
     for setup, g in primary.groupby("setup", sort=True):
         n = len(g)
@@ -266,6 +274,12 @@ def report(df, min_exp, alpha, n_boot, burn_in: int = BURN_IN_TRADES):
             shown = f"mean={later.mean():+.3f}R" if len(later) else "no trades yet"
             print(f"  without burn-in: n={len(later)} {shown}  "
                   f"(comparison only; the gate uses every trade)")
+        if "gap_pct" in g.columns:
+            gap = g[pd.to_numeric(g["gap_pct"], errors="coerce").abs() > GAP_OPEN_PCT]
+            if len(gap):
+                print(f"  gap-open sessions (|gap| > {GAP_OPEN_PCT:.0%}): n={len(gap)} "
+                      f"win={(gap['R'] > 0).mean():.0%} mean={gap['R'].mean():+.3f}R  "
+                      f"(included; a different regime)")
         print(f"  sd={sigma:.3f}R  worst={g['R'].min():+.2f}R  best={g['R'].max():+.2f}R")
         print(f"  net P&L=${g['pnl_usd'].sum():,.0f}  "
               f"avg risk=${g['risk_usd'].mean():,.0f}/trade")

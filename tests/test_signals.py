@@ -10,7 +10,7 @@ from datetime import date, time, timedelta
 import numpy as np
 import pandas as pd
 
-from mesproto.config import ET, MES, S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS
+from mesproto.config import ET, GAP_OPEN_PCT, MES, S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS
 from mesproto.levels import build_sessions, load_dataframe_bars
 from mesproto.schema import fills_to_log, validate
 from mesproto.signals import (
@@ -362,19 +362,20 @@ def test_s1_one_signal_per_break():
     print(f"  one break, one signal at {sigs[0].signal_time.time()}")
 
 
-def test_s1_gap_open_beyond_limit_is_logged_separately():
-    """'Gap opens beyond 1% of prior close — log separately, different regime.'"""
+def test_s1_gap_open_is_included_and_flagged():
+    """Amended 2026-09-15: gap opens beyond 1% of the prior close are a
+    different regime, so they are flagged and reported separately — but they
+    no longer fail the checklist."""
     bars, lv, d1 = build_two_days(s1_path(), day1_center=4900.0)   # ~2% gap
-    assert abs(lv[d1].open_px / lv[d1].prior_close - 1) > 0.01
+    assert abs(lv[d1].gap_pct) > GAP_OPEN_PCT
     sigs = generate_s1(bars, lv[d1], MES)
-    assert sigs, "gapped sessions still log, flagged"
-    assert sigs[0].checklist["gap_within_limit"] is False
-    assert sigs[0].checklist_ok is False
+    assert sigs, "gapped sessions still trade"
+    assert "gap_within_limit" not in sigs[0].checklist, sigs[0].checklist
+    assert sigs[0].context["gap_pct"] == lv[d1].gap_pct
 
-    bars, lv, d1 = build_two_days(s1_path())                        # no gap
-    sigs = generate_s1(bars, lv[d1], MES)
-    assert sigs[0].checklist["gap_within_limit"] is True
-    print("  2% gap -> gap_within_limit False; flat open -> True")
+    log = fills_to_log([simulate(s, bars, MES) for s in sigs], MES)
+    assert abs(log["gap_pct"].iloc[0] - lv[d1].gap_pct) < 1e-9, log["gap_pct"].tolist()
+    print(f"  gap {lv[d1].gap_pct:+.2%}: not a checklist condition; logged as gap_pct")
 
 
 def test_s1_news_day_stands_down_before_1030():
@@ -533,7 +534,7 @@ def test_resting_entry_cancelled_at_stand_down():
     print("  order resting past 15:00 cancelled; S3 signals carry the deadline")
 
 
-def test_log_notes_only_list_real_flags():
+def test_log_failed_checks_and_notes():
     d = date(2026, 3, 3)
     ts = pd.Timestamp.combine(d, time(10, 30)).tz_localize(ET)
     clean = Signal(setup="IB_BREAK", session_date=d, direction="LONG", signal_time=ts,
@@ -545,9 +546,11 @@ def test_log_notes_only_list_real_flags():
     fills = [Fill(clean, True, ts, 5000.0, ts, 5008.0, "TARGET", 3, False),
              Fill(clean, True, ts, 5000.0, ts, 4996.0, "STOP", 1, True),
              Fill(flagged, True, ts, 5000.0, ts, 5008.0, "TARGET", 3, False)]
-    notes = fills_to_log(fills, MES)["notes"].tolist()
-    assert notes == ["", "ambiguous_bar", "delta_confirmed=None"], notes
-    print(f"  notes: {notes}")
+    log = fills_to_log(fills, MES)
+    assert log["notes"].tolist() == ["", "ambiguous_bar", ""], log["notes"].tolist()
+    assert log["failed_checks"].tolist() == ["", "", "delta_confirmed=None"], \
+        log["failed_checks"].tolist()
+    print(f"  notes: {log['notes'].tolist()}  failed_checks: {log['failed_checks'].tolist()}")
 
 
 def test_pipeline_produces_valid_log():

@@ -95,6 +95,9 @@ CONFIRM_N_MIN_EFFECT_R = 0.05   # floor on the effect used for "n to confirm"
 CONFIRM_N_MIN_SIGMA_R = 1.0     # floor on the sigma used for "n to confirm"
 DAY_TYPE_MIN_TRADES = 5         # smallest day-type bucket worth printing
 OFF_CHECKLIST_WARN_FRAC = 0.25  # validate() warns above this share of checklist_ok=0
+GAP_OPEN_PCT = 0.01             # |open / prior close - 1| beyond this is a gap-open session:
+                                # a different regime, reported separately but INCLUDED
+                                # in the primary sample (amended 2026-09-15)
 
 # --- setup parameters (pre-registered — changing one restarts the sample) -----
 S1_IB_RANGE_MIN_PCT = 0.0025
@@ -104,7 +107,6 @@ S1_RETEST_MAX_REENTRY_PTS = 2.0
 S1_STOP_BEYOND_SWING_PTS = 1.0
 S1_STOP_FLOOR_PTS = 4.0
 S1_STOP_CAP_PTS = 8.0
-S1_MAX_GAP_PCT = 0.01     # gap opens beyond this vs prior close: logged separately
 
 S3_MIN_OTF_BARS = 2
 S3_MAX_VWAP_CROSSES = 3

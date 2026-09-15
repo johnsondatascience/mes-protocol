@@ -43,7 +43,7 @@ import pandas as pd
 
 from .config import (
     ENTRY_MAX_WAIT_BARS, ET, MECHANICAL_TARGET_R, OTF_BAR_MINUTES, RTH_CLOSE,
-    RTH_OPEN, S1_BREAK_WINDOW, S1_DELTA_CONFIRM_BARS, S1_MAX_GAP_PCT,
+    RTH_OPEN, S1_BREAK_WINDOW, S1_DELTA_CONFIRM_BARS,
     S1_NEWS_STAND_DOWN_UNTIL, S1_RETEST_MAX_REENTRY_PTS, S1_STOP_BEYOND_SWING_PTS,
     S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, S3_ENTRY_CUTOFF, S3_MAX_COUNTER_DELTA_FRAC,
     S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS, S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS,
@@ -158,9 +158,12 @@ def generate_s1(
     Stand-downs. On FOMC / CPI / NFP days nothing is emitted before
     S1_NEWS_STAND_DOWN_UNTIL; `news_dates` is that calendar. Without one the
     stand-down cannot be verified, so earlier signals carry
-    no_news_stand_down=None. A gap open beyond S1_MAX_GAP_PCT of the prior
-    close is a different regime: still logged, but gap_within_limit=False
-    keeps it out of the primary sample (None when there is no prior close).
+    no_news_stand_down=None.
+
+    A gap open beyond GAP_OPEN_PCT of the prior close is a different regime,
+    but since the 2026-09-15 amendment it is not a checklist condition: the
+    trade is kept, and context["gap_pct"] lets the report show those sessions
+    on their own.
     """
     out: list[Signal] = []
     if not lv.s1_gate():
@@ -175,8 +178,6 @@ def generate_s1(
 
     delta = _bar_delta(rth)
     cum = delta.cumsum() if delta is not None else None
-    gap = lv.gap_pct
-    gap_ok = None if gap is None else bool(abs(gap) <= S1_MAX_GAP_PCT)
     news_day = None if news_dates is None else lv.date in news_dates
 
     state = "WAITING"
@@ -258,14 +259,13 @@ def generate_s1(
                 "delta_confirmed": delta_ok,
                 "retest_held": True,
                 "stop_within_cap": True,
-                "gap_within_limit": gap_ok,
                 "no_news_stand_down": news_ok,
             },
             context={
                 "ib_high": lv.ib_high, "ib_low": lv.ib_low,
                 "ib_range_pts": lv.ib_range, "day_type": lv.day_type,
                 "on_range_pos": lv.on_range_pos,   # S5 as a covariate
-                "gap_pct": gap,
+                "gap_pct": lv.gap_pct,
                 "break_time": str(win.index[break_i].time()),
             },
         ))
@@ -457,6 +457,7 @@ def generate_s3(
                 "otf_bars": max(lv.otf_up_bars, lv.otf_down_bars),
                 "vwap_crosses": int(crosses[i]),
                 "on_range_pos": lv.on_range_pos,
+                "gap_pct": lv.gap_pct,
                 "confirmed_at": str(confirm_at.time()),
             },
         ))
