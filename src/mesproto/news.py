@@ -19,24 +19,18 @@ outside that is unknown — None — never "no news" (invariant 2): a calendar
 fetched in March says nothing about June.
 
 Parsing is pure and tested offline. Only the fetch_* functions touch the
-network, and nothing runs on import.
+network (through mesproto.sources), and nothing runs on import.
 """
 
 from __future__ import annotations
 
-import json
 import re
-import urllib.error
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Collection, Iterable, Mapping, Optional
 
-from .config import (
-    FOMC_CALENDAR_URL, FOMC_EVENT, FOMC_HISTORICAL_URL, FRED_MAX_LIMIT,
-    FRED_RELEASE_DATES_URL, HTTP_TIMEOUT_S, HTTP_USER_AGENT, NEWS_FRED_RELEASES,
-)
+from .config import FOMC_CALENDAR_URL, FOMC_EVENT, FOMC_HISTORICAL_URL, NEWS_FRED_RELEASES
+from .sources import fetch_fred_release_dates, http_get
 
 CSV_HEADER = "date,event"
 
@@ -146,21 +140,6 @@ def missing_years(rows: Iterable[tuple[date, str]], start: date, end: date,
 
 
 # ---------------------------------------------------------------------------
-# FRED
-# ---------------------------------------------------------------------------
-
-def parse_fred_release_dates(payload: Mapping) -> list[date]:
-    """Dates from a fred/release/dates JSON response."""
-    if "error_message" in payload or "release_dates" not in payload:
-        raise ValueError(f"FRED error: {payload.get('error_message', 'no release_dates')}")
-    listed = payload["release_dates"]
-    if int(payload.get("count", len(listed))) > len(listed):
-        raise ValueError(f"FRED response is truncated ({len(listed)} of "
-                         f"{payload['count']} dates)")
-    return sorted(date.fromisoformat(r["date"]) for r in listed)
-
-
-# ---------------------------------------------------------------------------
 # federalreserve.gov FOMC calendars
 # ---------------------------------------------------------------------------
 
@@ -237,39 +216,14 @@ def parse_fomc_calendar(html: str) -> list[date]:
 # network — called only by scripts/fetch_news_calendar.py
 # ---------------------------------------------------------------------------
 
-def _get(url: str, params: Optional[dict] = None) -> bytes:
-    full = url + ("?" + urllib.parse.urlencode(params) if params else "")
-    request = urllib.request.Request(full, headers={"User-Agent": HTTP_USER_AGENT})
-    with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_S) as response:
-        return response.read()
-
-
-def fetch_fred_release_dates(release_id: int, api_key: str) -> list[date]:
-    """Every date a FRED release came out. Errors never echo the request URL,
-    because it carries the API key."""
-    params = {"release_id": release_id, "api_key": api_key, "file_type": "json",
-              "limit": FRED_MAX_LIMIT, "sort_order": "asc"}
-    try:
-        body = _get(FRED_RELEASE_DATES_URL, params)
-    except urllib.error.HTTPError as e:
-        body = e.read()                        # FRED explains errors in the body
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"FRED release {release_id}: {e.reason}") from None
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        raise RuntimeError(f"FRED release {release_id}: response was not JSON") from None
-    return parse_fred_release_dates(payload)
-
-
 def fetch_fomc_statement_days(first_year: int) -> list[date]:
     """Scheduled FOMC statement days from `first_year` on. The main calendar
     page holds recent years; older years each have a historical page."""
-    days = parse_fomc_calendar(_get(FOMC_CALENDAR_URL).decode("utf-8", "replace"))
+    days = parse_fomc_calendar(http_get(FOMC_CALENDAR_URL).decode("utf-8", "replace"))
     if not days:
         raise ValueError("no FOMC meetings found on the calendar page — layout changed?")
     for year in range(first_year, min(d.year for d in days)):
-        page = _get(FOMC_HISTORICAL_URL.format(year=year)).decode("utf-8", "replace")
+        page = http_get(FOMC_HISTORICAL_URL.format(year=year)).decode("utf-8", "replace")
         days += parse_fomc_calendar(page)
     return sorted(set(days))
 

@@ -11,7 +11,6 @@ each evaluation block; run_pipeline.py warns about sessions it does not cover.
 """
 
 import argparse
-import os
 import sys
 from collections import Counter
 from datetime import date, timedelta
@@ -25,17 +24,7 @@ from mesproto.config import (  # noqa: E402
 from mesproto.news import (  # noqa: E402
     fetch_news_rows, load_news_calendar, missing_years, write_news_calendar,
 )
-
-
-def read_api_key(env_file: Path) -> str:
-    key = os.environ.get("FRED_API_KEY", "").strip()
-    if key or not env_file.is_file():
-        return key
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        name, sep, value = line.partition("=")
-        if sep and name.strip().removeprefix("export ").strip() == "FRED_API_KEY":
-            return value.strip().strip("'\"")
-    return ""
+from mesproto.sources import read_api_key  # noqa: E402
 
 
 def main() -> int:

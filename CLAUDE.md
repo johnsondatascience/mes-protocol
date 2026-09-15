@@ -36,8 +36,9 @@ src/mesproto/
                 anywhere else — if you find one, move it here.
   levels.py     loaders (CSV / Databento TBBO) -> bars; volume profile and
                 value area; SessionLevels per RTH day; day-type classification.
+  sources.py    network access to FRED and federalreserve.gov (scripts only).
   news.py       scheduled-release calendar (FRED + federalreserve.gov): parsers,
-                the coverage-aware NewsCalendar, and the fetchers the script uses.
+                the coverage-aware NewsCalendar, and the FOMC fetcher.
   signals.py    S1, IB_FAIL and S3 generators; pessimistic fill simulation.
                 S1 and IB_FAIL share one walk of the tape, so a break yields
                 at most one of them.
