@@ -17,6 +17,7 @@ identically.
 | Setup | Testable from bars? | How it is evaluated |
 |---|---|---|
 | S1 IB break and retest | Partly | `generate_s1`; delta condition needs TBBO |
+| IB_FAIL (S1's failed retest, traded the other way) | Yes | `generate_ib_fail` |
 | S2 Value-area edge to VPOC | No | Manual replay — needs DOM resting size |
 | S3 VWAP pullback continuation | Yes | `generate_s3` |
 | S4 HVN absorption reversal | No | Manual replay — needs the book |

@@ -11,7 +11,8 @@ sample-size math — is in `docs/protocol.html`. This code exists to:
 
 1. compute session levels (value area, IB, VWAP, overnight range, day type)
    without look-ahead,
-2. generate signals for the two setups that can be checked from bars (S1, S3),
+2. generate signals for the setups that can be checked from bars (S1, its
+   IB_FAIL mirror, and S3),
 3. score them under deliberately pessimistic fill assumptions,
 4. evaluate the resulting trade log with a session-block bootstrap.
 
@@ -37,7 +38,9 @@ src/mesproto/
                 value area; SessionLevels per RTH day; day-type classification.
   news.py       scheduled-release calendar (FRED + federalreserve.gov): parsers,
                 the coverage-aware NewsCalendar, and the fetchers the script uses.
-  signals.py    S1 and S3 generators; pessimistic fill simulation.
+  signals.py    S1, IB_FAIL and S3 generators; pessimistic fill simulation.
+                S1 and IB_FAIL share one walk of the tape, so a break yields
+                at most one of them.
   schema.py     the canonical trade-log shape, shared by hand-logged replay
                 and generated signals; validation.
   evaluate.py   R computation, session-block bootstrap, futility gates. CLI.

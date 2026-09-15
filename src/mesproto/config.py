@@ -134,6 +134,13 @@ S1_STOP_BEYOND_SWING_PTS = 1.0
 S1_STOP_FLOOR_PTS = 4.0
 S1_STOP_CAP_PTS = 8.0
 
+# IB_FAIL (added 2026-09-15): the S1 break whose retest fails — a bar closes more
+# than S1_RETEST_MAX_REENTRY_PTS back inside, within S1_BREAK_WINDOW. Traded the
+# other way: stop entry 1 tick beyond the failure bar, stop beyond the false break.
+IB_FAIL_STOP_BEYOND_EXTREME_PTS = 1.0
+IB_FAIL_STOP_FLOOR_PTS = 4.0
+IB_FAIL_STOP_CAP_PTS = 8.0
+
 S3_MIN_OTF_BARS = 2
 S3_MAX_VWAP_CROSSES = 3
 S3_VWAP_TOLERANCE_PTS = 2.0

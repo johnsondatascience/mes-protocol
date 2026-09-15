@@ -42,7 +42,8 @@ import numpy as np
 import pandas as pd
 
 from .config import (
-    ENTRY_MAX_WAIT_BARS, ET, MECHANICAL_TARGET_R, OTF_BAR_MINUTES, RTH_CLOSE,
+    ENTRY_MAX_WAIT_BARS, ET, IB_FAIL_STOP_BEYOND_EXTREME_PTS, IB_FAIL_STOP_CAP_PTS,
+    IB_FAIL_STOP_FLOOR_PTS, MECHANICAL_TARGET_R, OTF_BAR_MINUTES, RTH_CLOSE,
     RTH_OPEN, S1_BREAK_WINDOW, S1_DELTA_CONFIRM_BARS,
     S1_NEWS_EVENTS, S1_NEWS_STAND_DOWN_UNTIL, S1_RETEST_MAX_REENTRY_PTS,
     S1_STOP_BEYOND_SWING_PTS,
@@ -149,8 +150,8 @@ def generate_s1(
     """Break of the IB between 10:00 and 11:30, entered on the retest.
 
     State machine: WAITING -> BROKEN (close crosses the IB edge from inside)
-    -> RETEST (price returns to the edge without re-entering by more than
-    S1_RETEST_MAX_REENTRY_PTS) -> emit.
+    -> RETEST (price returns to the edge without closing back inside by more
+    than S1_RETEST_MAX_REENTRY_PTS) -> emit.
 
     A break is a *crossing*. Price that stays beyond the edge after a signal,
     a failed retest, or a stand-down is still the same break; re-arming on
@@ -167,6 +168,36 @@ def generate_s1(
     trade is kept, and context["gap_pct"] lets the report show those sessions
     on their own.
     """
+    return [s for s in _ib_break_signals(bars, lv, contract, news) if s.setup == "IB_BREAK"]
+
+
+def generate_ib_fail(
+    bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
+    news: Optional[NewsCalendar] = None,
+) -> list[Signal]:
+    """The S1 break whose retest fails, traded the other way (added 2026-09-15).
+
+    Protocol §05: "The false break that reverses back through the entire IB.
+    Log those as IB_FAIL." Waiting for the whole IB to be crossed would be
+    chasing, so the trigger is the moment the break is known to have failed:
+    the first bar in S1_BREAK_WINDOW that closes more than
+    S1_RETEST_MAX_REENTRY_PTS back inside — exactly the condition that ends
+    an S1 break. S1 and IB_FAIL share one walk of the tape, so a break yields
+    at most one of them: S1 if a retest held first, IB_FAIL if it failed.
+
+    Entry is a stop order 1 tick beyond the failure bar's far end (proof, not
+    anticipation). The stop sits IB_FAIL_STOP_BEYOND_EXTREME_PTS beyond the
+    false break's extreme; structure wider than IB_FAIL_STOP_CAP_PTS is no
+    trade. S1's gate, news stand-down and gap flag apply unchanged.
+    """
+    return [s for s in _ib_break_signals(bars, lv, contract, news) if s.setup == "IB_FAIL"]
+
+
+def _ib_break_signals(
+    bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
+    news: Optional[NewsCalendar],
+) -> list[Signal]:
+    """One walk of the S1 window emitting both IB_BREAK and IB_FAIL signals."""
     out: list[Signal] = []
     if not lv.s1_gate():
         return out
@@ -182,11 +213,26 @@ def generate_s1(
     cum = delta.cumsum() if delta is not None else None
     news_day = None if news is None else news.is_news_day(lv.date, S1_NEWS_EVENTS)
 
+    def news_status(ts: pd.Timestamp) -> Optional[bool]:
+        """True clear, False stand down, None unverifiable."""
+        if ts.time() >= S1_NEWS_STAND_DOWN_UNTIL:
+            return True
+        return None if news_day is None else not news_day
+
+    def context(break_i: int, **extra) -> dict:
+        return {"ib_high": lv.ib_high, "ib_low": lv.ib_low,
+                "ib_range_pts": lv.ib_range, "day_type": lv.day_type,
+                "on_range_pos": lv.on_range_pos,   # S5 as a covariate
+                "gap_pct": lv.gap_pct,
+                "break_time": str(win.index[break_i].time()), **extra}
+
     state = "WAITING"
     direction: Optional[Direction] = None
     edge = np.nan
     break_i = -1
-    retest_extreme = np.nan
+    retest_extreme = np.nan   # swing an S1 stop goes beyond (pullback side)
+    break_extreme = np.nan    # furthest the break reached (an IB_FAIL stop's anchor)
+    s1_blocked = False        # S1's structure exceeded its cap on this break
 
     for i, (ts, bar) in enumerate(win.iterrows()):
         if state == "WAITING":
@@ -199,33 +245,56 @@ def generate_s1(
                 # anchor is the swing the stop goes BEYOND: the pullback low on
                 # a long break, the pullback high on a short one.
                 retest_extreme = bar["low"] if direction == "LONG" else bar["high"]
+                break_extreme = bar["high"] if direction == "LONG" else bar["low"]
+                s1_blocked = False
             continue
 
         sign = 1 if direction == "LONG" else -1
         if direction == "LONG":
             retest_extreme = min(retest_extreme, bar["low"])
+            break_extreme = max(break_extreme, bar["high"])
         else:
             retest_extreme = max(retest_extreme, bar["high"])
+            break_extreme = min(break_extreme, bar["low"])
 
         # failure: a bar CLOSED back inside the IB by more than the tolerance.
         # A wick deeper inside that closes within it is a retest that held
         # (amended 2026-09-15); the wick still sets the swing the stop goes beyond.
         reentry = (edge - bar["close"]) if direction == "LONG" else (bar["close"] - edge)
         if reentry > S1_RETEST_MAX_REENTRY_PTS:
+            fail_news = news_status(ts)
+            if fail_news is not False:
+                fail_sign = -sign
+                entry = float(bar["low"] - contract.tick) if fail_sign < 0 \
+                    else float(bar["high"] + contract.tick)
+                raw_stop = break_extreme - fail_sign * IB_FAIL_STOP_BEYOND_EXTREME_PTS
+                stop = _clamp_stop(entry, raw_stop, fail_sign,
+                                   IB_FAIL_STOP_FLOOR_PTS, IB_FAIL_STOP_CAP_PTS)
+                if stop is not None:
+                    out.append(Signal(
+                        setup="IB_FAIL", session_date=lv.date,
+                        direction="SHORT" if fail_sign < 0 else "LONG",
+                        signal_time=ts, entry_px=entry, stop_px=stop, entry_style="STOP",
+                        checklist={
+                            "ib_range_in_band": True,
+                            "break_in_window": True,
+                            "failed_in_window": True,
+                            "stop_within_cap": True,
+                            "no_news_stand_down": fail_news,
+                        },
+                        context=context(break_i, failed_break_extreme=float(break_extreme)),
+                    ))
             state, direction = "WAITING", None
             continue
 
         # retest: this bar traded back to the edge without breaking the tolerance
         touched = (bar["low"] <= edge) if direction == "LONG" else (bar["high"] >= edge)
-        if not touched or i == break_i:
+        if s1_blocked or not touched or i == break_i:
             continue
 
-        if ts.time() < S1_NEWS_STAND_DOWN_UNTIL:
-            if news_day:
-                continue                      # stand down; the break stays armed
-            news_ok: Optional[bool] = None if news_day is None else True
-        else:
-            news_ok = True
+        news_ok = news_status(ts)
+        if news_ok is False:
+            continue                          # stand down; the break stays armed
 
         # delta confirmation: cumulative delta made a new session extreme in the
         # break direction on the break bar or within N bars after it. Only bars
@@ -251,7 +320,9 @@ def generate_s1(
             raw_stop = entry - sign * S1_STOP_FLOOR_PTS
         stop = _clamp_stop(entry, raw_stop, sign, S1_STOP_FLOOR_PTS, S1_STOP_CAP_PTS)
         if stop is None:
-            state, direction = "WAITING", None
+            # The swing only gets wider on later bars, so S1 is done with this
+            # break — but it stays armed, because it can still fail (IB_FAIL).
+            s1_blocked = True
             continue
 
         out.append(Signal(
@@ -265,13 +336,7 @@ def generate_s1(
                 "stop_within_cap": True,
                 "no_news_stand_down": news_ok,
             },
-            context={
-                "ib_high": lv.ib_high, "ib_low": lv.ib_low,
-                "ib_range_pts": lv.ib_range, "day_type": lv.day_type,
-                "on_range_pos": lv.on_range_pos,   # S5 as a covariate
-                "gap_pct": lv.gap_pct,
-                "break_time": str(win.index[break_i].time()),
-            },
+            context=context(break_i),
         ))
         state, direction = "WAITING", None   # one signal per break sequence
     return out
@@ -551,7 +616,7 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
 def run_session(bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
                 s3_entry_style: EntryStyle = "LIMIT",
                 news: Optional[NewsCalendar] = None) -> list[Fill]:
-    signals = generate_s1(bars, lv, contract, news=news) + \
+    signals = _ib_break_signals(bars, lv, contract, news) + \
         generate_s3(bars, lv, contract, entry_style=s3_entry_style)
     signals.sort(key=lambda s: s.signal_time)
     return [simulate(s, bars, contract) for s in signals]

@@ -368,7 +368,7 @@
         <dt>Stand down</dt><dd>FOMC / CPI / NFP / PPI / retail sales days before 10:30 ET (PPI and retail sales amended in — see §09) — FOMC meaning the statement day of a scheduled meeting, releases meaning the day they actually came out (clarified — see §09). Gap opens beyond 1% of prior close are a different regime — traded and flagged, and reported separately (amended — see §09).</dd>
       </dl>
     </div>
-    <div class="fail"><b>Known failure mode</b>The false break that reverses back through the entire IB. Log those as <code>IB_FAIL</code> with the same schema — the mirror trade may carry more edge than the setup itself, and you'll only find out if you record it.</div>
+    <div class="fail"><b>Known failure mode</b>The false break that reverses back through the entire IB. Log those as <code>IB_FAIL</code> with the same schema — the mirror trade may carry more edge than the setup itself, and you'll only find out if you record it. <em>IB_FAIL rules (added — see §09):</em> same IB range filter, 10:00–11:30 window and stand-downs as S1. Trigger: the first bar after a break that closes more than 2 points back inside the IB. Entry: stop order 1 tick beyond that bar's far end, in the reversal direction. Stop: 1 point beyond the false break's extreme; floor 4 pts, cap 8 pts — wider structure is no trade. Target: 2R. A break yields S1 or IB_FAIL, never both.</div>
   </article>
 
   <article class="setup">
@@ -526,6 +526,7 @@ python mes_replay_eval.py trades.csv --min-expectancy 0.15 --alpha 0.01
         <tr><td class="mono-c">2026-09-15</td><td>Clarifies the S1 news stand-down. An FOMC day is the statement day of a scheduled meeting; unscheduled meetings, notation votes and cancelled meetings do not count, since none could be planned around that morning. CPI and NFP days are the dates the release actually came out (FRED), including delayed releases. A session the news calendar does not cover cannot verify the stand-down and leaves the primary sample.</td><td>None — clarifies an undefined term</td></tr>
         <tr><td class="mono-c">2026-09-15</td><td>S1 also stands down before 10:30 ET on PPI and advance retail sales release days. Together with FOMC, CPI and NFP that is about 50 sessions a year (roughly one in five), up from about 32.</td><td>S1 — none collected yet</td></tr>
         <tr><td class="mono-c">2026-09-15</td><td>S1 retest: "closing back inside by more than 2 points" is judged on the bar's close. The generator had used the bar's low (high for shorts), which cancelled retests whose wick poked deeper but closed within 2 points. The wick still sets the swing the stop goes beyond.</td><td>S1 — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>IB_FAIL gets entry and stop rules (see the S1 failure-mode note). It triggers when a break closes more than 2 points back inside, rather than after price crosses the whole IB, so the entry does not chase. S1 and IB_FAIL take different outcomes of the same break and never both trade it.</td><td>IB_FAIL — new sample</td></tr>
       </tbody>
     </table>
   </div>

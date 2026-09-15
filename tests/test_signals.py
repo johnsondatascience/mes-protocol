@@ -11,13 +11,14 @@ import numpy as np
 import pandas as pd
 
 from mesproto.config import (
-    ET, GAP_OPEN_PCT, MES, S1_NEWS_EVENTS, S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, SPY,
+    ET, GAP_OPEN_PCT, IB_FAIL_STOP_BEYOND_EXTREME_PTS, IB_FAIL_STOP_CAP_PTS,
+    IB_FAIL_STOP_FLOOR_PTS, MES, S1_NEWS_EVENTS, S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, SPY,
 )
 from mesproto.levels import build_sessions, load_dataframe_bars
 from mesproto.news import NewsCalendar
 from mesproto.schema import fills_to_log, validate
 from mesproto.signals import (
-    Fill, Signal, generate_s1, generate_s3, run_all, simulate,
+    Fill, Signal, generate_ib_fail, generate_s1, generate_s3, run_all, simulate,
 )
 from mesproto.evaluate import compute_r
 
@@ -464,6 +465,129 @@ def test_s1_news_events_are_the_amended_list():
         assert all(s.signal_time.time() >= time(10, 30) for s in sigs), \
             (event, [s.signal_time.time() for s in sigs])
     print("  PPI and retail-sales days stand S1 down before 10:30")
+
+
+# --- IB_FAIL: the break whose retest fails -----------------------------------
+
+def ib_fail_bars(spike_high=5013.0, retest_low=None, break_delta=None):
+    """IB 4989.5-5010.5; upside break closes 5012 at 10:00; 10:01 spikes to
+    `spike_high` (and, if given, wicks down to `retest_low`); 10:02 closes
+    5007.5 (3 points back inside, low 5007.0); then price falls through the IB.
+    `break_delta` puts a new cumulative-delta high on the break bar."""
+    d0, d1 = date(2026, 3, 2), S1_LOOKAHEAD_DATE
+    ib = np.concatenate([np.linspace(5000, 5010, 8), np.linspace(5010, 4990, 15),
+                         np.linspace(4990, 5002, 7)])
+    path = np.concatenate([ib, [5012.0, 5011.5, 5007.5], np.linspace(5007, 4985, 30)])
+    path = np.concatenate([path, np.full(390 - len(path), 4985.0)])
+    day = bars_from_path(d1, path, overnight_center=5000.0)
+    day.loc[_bar_at(day, d1, 10, 1), "high"] = spike_high
+    if retest_low is not None:
+        day.loc[_bar_at(day, d1, 10, 1), "low"] = retest_low
+    if break_delta is not None:
+        rth = (day.index.date == d1) & (day.index.time >= time(9, 30))
+        deltas = np.full(390, -20.0)
+        deltas[:30] = 100.0
+        deltas[30] = break_delta
+        vol = day.loc[rth, "volume"].to_numpy()
+        day.loc[rth, "buy_volume"] = (vol + deltas) / 2
+        day.loc[rth, "sell_volume"] = (vol - deltas) / 2
+    return load_dataframe_bars(pd.concat([prior_balance_day(d0), day]).sort_index(),
+                               source="FUTURES")
+
+
+def _sessions(bars):
+    return {x.date: x for x in build_sessions(bars, tick=TICK)}
+
+
+def test_ib_fail_enters_when_the_retest_fails():
+    """Entry: stop order 1 tick beyond the failure bar's far end. Stop: 1 point
+    beyond the false break's extreme. Floor 4, cap 8."""
+    bars = ib_fail_bars()
+    d = S1_LOOKAHEAD_DATE
+    sigs = generate_ib_fail(bars, _sessions(bars)[d], MES)
+    assert len(sigs) == 1, [s.signal_time.time() for s in sigs]
+    s = sigs[0]
+    assert (s.setup, s.direction, s.entry_style) == ("IB_FAIL", "SHORT", "STOP"), s
+    assert s.signal_time == _bar_at(bars, d, 10, 2), s.signal_time
+    assert abs(s.entry_px - (5007.0 - TICK)) < 1e-9, s.entry_px
+    assert abs(s.stop_px - (5013.0 + IB_FAIL_STOP_BEYOND_EXTREME_PTS)) < 1e-9, s.stop_px
+    assert IB_FAIL_STOP_FLOOR_PTS <= s.risk_pts <= IB_FAIL_STOP_CAP_PTS, s.risk_pts
+    assert set(s.checklist) == {"ib_range_in_band", "break_in_window", "failed_in_window",
+                                "stop_within_cap", "no_news_stand_down"}, sorted(s.checklist)
+    assert s.context["break_time"] == "10:00:00" and "gap_pct" in s.context
+    print(f"  SHORT stop-entry {s.entry_px} stop {s.stop_px} risk {s.risk_pts:.2f} "
+          f"@ {s.signal_time.time()}")
+
+
+def test_ib_fail_structure_beyond_cap_is_no_trade():
+    bars = ib_fail_bars(spike_high=5016.0)          # stop 5017, entry 5006.75: 10.25 pts
+    assert generate_ib_fail(bars, _sessions(bars)[S1_LOOKAHEAD_DATE], MES) == []
+    print("  10.25-point structure -> no trade, never a widened cap")
+
+
+def test_ib_fail_returns_nothing_when_gate_fails():
+    flat = np.concatenate([np.full(30, 5000.0), np.linspace(5000, 5060, 360)])
+    bars, lv, d1 = build_two_days(flat)
+    assert lv[d1].s1_gate() is False
+    assert generate_ib_fail(bars, lv[d1], MES) == []
+    print("  out-of-band IB -> []")
+
+
+def test_ib_fail_and_s1_never_take_the_same_break():
+    """S1 takes the retest that holds; IB_FAIL the one that fails. One break,
+    at most one of the two."""
+    held = s1_quick_retest_bars(break_delta=500.0,
+                                retest_deltas=[-50.0, -50.0, -50.0, -50.0, -50.0])
+    failed = ib_fail_bars()
+    for bars in (held, failed):
+        lv = _sessions(bars)[S1_LOOKAHEAD_DATE]
+        s1 = {s.context["break_time"] for s in generate_s1(bars, lv, MES)}
+        fail = {s.context["break_time"] for s in generate_ib_fail(bars, lv, MES)}
+        assert not s1 & fail, (s1, fail)
+        assert s1 or fail, "each fixture should produce one of the two"
+    lv = _sessions(held)[S1_LOOKAHEAD_DATE]
+    assert generate_s1(held, lv, MES) and not generate_ib_fail(held, lv, MES)
+    print("  held retest -> S1 only; failed retest -> IB_FAIL only")
+
+
+def test_break_too_wide_for_s1_can_still_fail():
+    """A retest whose swing is too wide for S1's cap ends S1's interest, not
+    the break: if it then closes back inside, that is an IB_FAIL."""
+    bars = ib_fail_bars(retest_low=5003.5, break_delta=500.0)   # S1 stop 5002.5: 8.25 pts
+    lv = _sessions(bars)[S1_LOOKAHEAD_DATE]
+    assert generate_s1(bars, lv, MES) == [], "S1 must stand down on the wide swing"
+    fails = generate_ib_fail(bars, lv, MES)
+    assert len(fails) == 1 and fails[0].signal_time.time() == time(10, 2), \
+        [s.signal_time.time() for s in fails]
+    print("  S1 capped out at 10:01; the 10:02 failure is still an IB_FAIL")
+
+
+def test_ib_fail_news_day_stands_down_before_1030():
+    bars = ib_fail_bars()
+    d = S1_LOOKAHEAD_DATE
+    lv = _sessions(bars)[d]
+    cal = NewsCalendar(start=d, end=d, events=frozenset(S1_NEWS_EVENTS),
+                       days={d: frozenset({"CPI"})})
+    assert generate_ib_fail(bars, lv, MES, news=cal) == []
+    unknown = generate_ib_fail(bars, lv, MES)
+    assert unknown[0].checklist["no_news_stand_down"] is None
+    print("  CPI day: 10:02 failure stood down; no calendar -> None")
+
+
+def test_ib_fail_signals_survive_truncation():
+    assert_signals_survive_truncation(generate_ib_fail, ib_fail_bars(), S1_LOOKAHEAD_DATE)
+    print("  IB_FAIL reproducible from the tape cut at its own bar")
+
+
+def test_ib_fail_flows_through_run_all_and_validates():
+    bars = ib_fail_bars()
+    log = fills_to_log(run_all(bars, build_sessions(bars, tick=TICK), MES), MES)
+    assert "IB_FAIL" in set(log["setup"]), log["setup"].tolist()
+    res = validate(log)
+    assert res.ok, res.errors
+    row = log[log["setup"] == "IB_FAIL"].iloc[0]
+    print(f"  IB_FAIL {row['direction']} {row['entry_px']} -> {row['exit_reason']} "
+          f"{row['exit_px']}")
 
 
 def test_s3_checklist_maps_every_protocol_condition():

@@ -16,7 +16,9 @@ from .levels import (
 )
 from .news import NewsCalendar, load_news_calendar
 from .schema import fills_to_log, validate, write_template
-from .signals import Fill, Signal, generate_s1, generate_s3, run_all, simulate
+from .signals import (
+    Fill, Signal, generate_ib_fail, generate_s1, generate_s3, run_all, simulate,
+)
 
 __version__ = "0.1.0"
 
@@ -26,6 +28,6 @@ __all__ = [
     "load_databento_tbbo", "load_dataframe_bars", "sessions_to_frame",
     "tbbo_to_bars", "volume_profile", "volume_profile_from_trades",
     "NewsCalendar", "load_news_calendar",
-    "Fill", "Signal", "generate_s1", "generate_s3", "run_all", "simulate",
+    "Fill", "Signal", "generate_ib_fail", "generate_s1", "generate_s3", "run_all", "simulate",
     "fills_to_log", "validate", "write_template",
 ]
