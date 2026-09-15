@@ -398,11 +398,11 @@
       <dl class="spec">
         <dt>Day gate</dt><dd>All three, confirmed before any entry: open outside prior value; one-timeframing on 30-min bars for 2 consecutive bars; session cumulative delta at a session extreme with price.</dd>
         <dt>Trigger</dt><dd><ul>
-          <li>Pullback to session VWAP ± 2 points, or to the developing value-area edge</li>
+          <li>Pullback to session VWAP ± 2 points, or to within 2 points of the developing value-area edge — today's value-area high for a long, low for a short, from the profile so far. Price must have been more than 2 points away from the level on the trend side first, and one pullback gives one entry (clarified — see §09)</li>
           <li>Declining volume on the pullback versus the impulse leg</li>
           <li>Counter-delta on the pullback under 40% of the impulse delta — fading, not reversing</li>
         </ul></dd>
-        <dt>Entry</dt><dd>Choose one and pre-register it: limit at VWAP, <em>or</em> stop-entry 1 tick beyond the pullback bar's extreme. Mixing them mid-study destroys the sample.</dd>
+        <dt>Entry</dt><dd>Choose one and pre-register it: limit at VWAP (or at the value-area edge, when that is the level the pullback reached), <em>or</em> stop-entry 1 tick beyond the pullback bar's extreme. Mixing them mid-study destroys the sample.</dd>
         <dt>Stop</dt><dd>Beyond the low-volume node under the pullback. Floor 5 pts, cap 10 pts.</dd>
         <dt>Target</dt><dd>Mechanical: 2R. Managed: trail on 30-min structure. A fixed 1R target here throws away the setup's entire reason for existing.</dd>
         <dt>Stand down</dt><dd>After 15:00 ET. Any day where VWAP has been crossed more than 3 times — that's a balance day in a trend costume.</dd>
@@ -527,6 +527,7 @@ python mes_replay_eval.py trades.csv --min-expectancy 0.15 --alpha 0.01
         <tr><td class="mono-c">2026-09-15</td><td>S1 also stands down before 10:30 ET on PPI and advance retail sales release days. Together with FOMC, CPI and NFP that is about 50 sessions a year (roughly one in five), up from about 32.</td><td>S1 — none collected yet</td></tr>
         <tr><td class="mono-c">2026-09-15</td><td>S1 retest: "closing back inside by more than 2 points" is judged on the bar's close. The generator had used the bar's low (high for shorts), which cancelled retests whose wick poked deeper but closed within 2 points. The wick still sets the swing the stop goes beyond.</td><td>S1 — none collected yet</td></tr>
         <tr><td class="mono-c">2026-09-15</td><td>IB_FAIL gets entry and stop rules (see the S1 failure-mode note). It triggers when a break closes more than 2 points back inside, rather than after price crosses the whole IB, so the entry does not chase. S1 and IB_FAIL take different outcomes of the same break and never both trade it.</td><td>IB_FAIL — new sample</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>S3 pullbacks to the developing value-area edge are built: within 2 points of today's value-area high (long) or low (short), from the session profile through the signal bar. A limit entry rests at the level reached, VWAP when both. A pullback must come from price more than 2 points away from the level on the trend side, and gives one entry; the generator had signalled at the session high on steady climbs and re-signalled while price sat on VWAP.</td><td>S3 — none collected yet</td></tr>
       </tbody>
     </table>
   </div>

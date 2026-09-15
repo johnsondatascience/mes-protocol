@@ -80,6 +80,26 @@ def s3_volumes():
     return v
 
 
+def s3_va_edge_path():
+    """Trend day that builds value 5060-5075 on heavy volume by 10:30, runs to
+    5100 on light volume, then pulls back to ~5076: inside 2 points of the
+    developing value-area high (~5074), but 6+ points above VWAP (~5069)."""
+    rise1 = np.linspace(5040, 5060, 10)                   # 09:30-09:40
+    value = np.linspace(5060, 5075, 50)                   # 09:40-10:30, heavy
+    rise2 = np.linspace(5075, 5100, 30)                   # 10:30-11:00, light
+    pull = np.concatenate([np.linspace(5100, 5077, 15), np.full(6, 5076.5)])
+    cont = np.linspace(5077, 5130, 60)
+    path = np.concatenate([rise1, value, rise2, pull, cont])
+    return np.concatenate([path, np.full(390 - len(path), 5130.0)])
+
+
+def s3_va_edge_volumes():
+    v = np.full(390, 600.0)
+    v[10:60] = 3000.0
+    v[90:111] = 250.0
+    return v
+
+
 def s3_chop_path():
     """Confirmed trend at 11:00, then two full swings through VWAP (4 crosses
     by 12:45), then an otherwise-textbook low-volume pullback into VWAP."""
@@ -596,7 +616,7 @@ def test_s3_checklist_maps_every_protocol_condition():
     sigs = generate_s3(bars, lv[d1], MES)
     assert sigs
     expected = {"opened_outside_value", "one_timeframing", "delta_at_extreme",
-                "vwap_crosses_ok", "pullback_to_vwap", "volume_declining",
+                "vwap_crosses_ok", "pullback_to_level", "volume_declining",
                 "counter_delta_ok", "stop_within_cap"}
     assert set(sigs[0].checklist) == expected, sorted(sigs[0].checklist)
     assert sigs[0].checklist_ok is True
@@ -693,6 +713,65 @@ def test_s3_log_carries_ib_range_covariate():
     assert not log.empty
     assert log["ib_range_pts"].notna().all(), log["ib_range_pts"].tolist()
     print(f"  S3 rows carry ib_range_pts={log['ib_range_pts'].iloc[0]:.2f}")
+
+
+def test_s3_pullback_to_developing_value_area_edge():
+    """§05: 'Pullback to session VWAP ± 2 points, or to the developing
+    value-area edge'. The edge is today's value-area high for a long, from
+    the session profile through the signal bar; a LIMIT entry rests there."""
+    from mesproto.config import S3_VA_EDGE_TOLERANCE_PTS, S3_VWAP_TOLERANCE_PTS
+    from mesproto.levels import rth_slice, volume_profile
+    bars, lv, d1 = build_two_days(s3_va_edge_path(), day2_vol=s3_va_edge_volumes(),
+                                  day2_on=5040.0)
+    s = lv[d1]
+    assert s.s3_gate() is True, "fixture must pass the day gate"
+    sigs = generate_s3(bars, s, MES)
+    assert sigs, "a pullback to the developing VAH should signal"
+    sig = sigs[0]
+    rth = rth_slice(bars, d1)
+    i = rth.index.get_loc(sig.signal_time)
+    vah = volume_profile(rth.iloc[:i + 1], tick=TICK).vah
+    assert abs(rth["low"].iloc[i] - s.vwap.iloc[i]) > S3_VWAP_TOLERANCE_PTS, "not a VWAP touch"
+    assert abs(rth["low"].iloc[i] - vah) <= S3_VA_EDGE_TOLERANCE_PTS
+    assert sig.context["pullback_level"] == "VA_EDGE", sig.context
+    assert sig.checklist["pullback_to_level"] is True
+    assert abs(sig.entry_px - vah) < 1e-9, (sig.entry_px, vah)
+    assert_signals_survive_truncation(generate_s3, bars, d1)
+    print(f"  {sig.signal_time.time()}: low {rth['low'].iloc[i]:.2f}, developing VAH {vah:.2f}, "
+          f"VWAP {s.vwap.iloc[i]:.2f} -> LIMIT at {sig.entry_px:.2f}")
+
+
+def test_s3_price_already_at_a_level_is_not_a_pullback():
+    """On a steady climb the developing value-area high sits at the session
+    high. A bar there has not pulled back to anything: price must first be
+    away from a level before coming back to it counts."""
+    bars, lv, d1 = build_two_days(s3_path(), day2_vol=s3_volumes(), day2_on=5040.0)
+    sigs = generate_s3(bars, lv[d1], MES)
+    assert sigs, "the VWAP pullback should still signal"
+    assert sigs[0].context["pullback_level"] == "VWAP", \
+        [(s.signal_time.time(), s.context["pullback_level"], s.entry_px) for s in sigs]
+    print(f"  first signal {sigs[0].signal_time.time()} at VWAP {sigs[0].entry_px:.2f}, "
+          f"not at the session high")
+
+
+def s3_hug_bars():
+    """Pullback reaches VWAP at ~11:20 and sits on it for 25 quiet bars."""
+    rise, pull = np.linspace(5040, 5100, 90), np.linspace(5100, 5070, 25)
+    path = np.concatenate([rise, pull, np.full(25, 5070.0), np.linspace(5070, 5130, 80)])
+    path = np.concatenate([path, np.full(390 - len(path), 5130.0)])
+    vol = np.full(390, 1500.0)
+    vol[90:115] = 400.0
+    vol[115:140] = 150.0
+    return build_two_days(path, day2_vol=vol, day2_on=5040.0)
+
+
+def test_s3_one_signal_per_pullback():
+    """Sitting on VWAP is one pullback, not a trade every few bars. After a
+    signal, price must leave the level before another pullback can count."""
+    bars, lv, d1 = s3_hug_bars()
+    sigs = generate_s3(bars, lv[d1], MES)
+    assert len(sigs) == 1, [(s.signal_time.time(), round(s.entry_px, 2)) for s in sigs]
+    print(f"  25 bars on VWAP -> one signal at {sigs[0].signal_time.time()}")
 
 
 def test_s3_signals_survive_truncation():

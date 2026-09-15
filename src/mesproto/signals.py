@@ -49,9 +49,9 @@ from .config import (
     S1_STOP_BEYOND_SWING_PTS,
     S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, S3_ENTRY_CUTOFF, S3_MAX_COUNTER_DELTA_FRAC,
     S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS, S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS,
-    S3_VWAP_TOLERANCE_PTS, Contract,
+    S3_VA_EDGE_TOLERANCE_PTS, S3_VWAP_TOLERANCE_PTS, Contract,
 )
-from .levels import SessionLevels, rth_slice, running_crosses
+from .levels import SessionLevels, rth_slice, running_crosses, volume_profile
 from .news import NewsCalendar
 
 Direction = Literal["LONG", "SHORT"]
@@ -403,7 +403,8 @@ def generate_s3(
     bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
     entry_style: EntryStyle = "LIMIT",
 ) -> list[Signal]:
-    """Pullback to session VWAP on a confirmed trend day.
+    """Pullback to session VWAP or the developing value-area edge on a confirmed
+    trend day.
 
     Day gate, all confirmed before any entry: opened outside prior value,
     one-timeframing on 30-minute bars, and cumulative delta at a session
@@ -417,8 +418,14 @@ def generate_s3(
     count keeps running after the 11:00 classification, because an afternoon
     of chop is exactly the balance day in a trend costume the rule exists for.
 
-    `entry_style` is pre-registered per the protocol: LIMIT at VWAP, or STOP
-    beyond the pullback bar's extreme. Pick one and never mix within a sample.
+    A pullback is a bar whose low (high, for a short) comes within
+    S3_VWAP_TOLERANCE_PTS of VWAP or S3_VA_EDGE_TOLERANCE_PTS of the developing
+    value-area edge — the top of today's value for a long, the bottom for a
+    short, from the session profile through that bar (amended 2026-09-15).
+
+    `entry_style` is pre-registered per the protocol: LIMIT at the level the
+    pullback reached (VWAP when it reached both), or STOP beyond the pullback
+    bar's extreme. Pick one and never mix within a sample.
     """
     out: list[Signal] = []
     if not lv.s3_gate():
@@ -450,6 +457,12 @@ def generate_s3(
     # for the first one) to the start of the current pullback
     last_touch_i = 0
     idx_all = rth.index
+    # A pullback comes back TO a level, so price must first have been away
+    # from it on the trend side. Without this, a steady climb whose developing
+    # value-area high rides at the session high "pulls back" without moving,
+    # and a pullback resting on VWAP re-signals every few bars. Reset after
+    # each signal: one signal per pullback.
+    away_vwap = away_edge = False
 
     for ts, bar in tradeable.iterrows():
         i = idx_all.get_loc(ts)
@@ -458,8 +471,21 @@ def generate_s3(
         v = vwap.iloc[i]
         if np.isnan(v):
             continue
-        near = (abs(bar["low"] - v) <= S3_VWAP_TOLERANCE_PTS) if direction == "LONG" \
-            else (abs(bar["high"] - v) <= S3_VWAP_TOLERANCE_PTS)
+        # the pullback's leading edge: the low on a long, the high on a short
+        probe = bar["low"] if direction == "LONG" else bar["high"]
+        # developing value area: today's profile through this bar, which has
+        # closed. A long pulls back to the top of value, a short to the bottom.
+        developing = volume_profile(rth.iloc[:i + 1], tick=contract.tick)
+        va_edge = None if developing is None else \
+            (developing.vah if direction == "LONG" else developing.val)
+
+        near_vwap = away_vwap and abs(probe - v) <= S3_VWAP_TOLERANCE_PTS
+        near_edge = away_edge and va_edge is not None \
+            and abs(probe - va_edge) <= S3_VA_EDGE_TOLERANCE_PTS
+        away_vwap = away_vwap or sign * (probe - v) > S3_VWAP_TOLERANCE_PTS
+        away_edge = away_edge or (va_edge is not None
+                                  and sign * (probe - va_edge) > S3_VA_EDGE_TOLERANCE_PTS)
+        near = near_vwap or near_edge
 
         if not near:
             if in_pullback:
@@ -490,8 +516,10 @@ def generate_s3(
         if vol_declining is not True:
             continue
 
+        level = "VWAP" if near_vwap else "VA_EDGE"
         if entry_style == "LIMIT":
-            entry = float(v)
+            # rest at the level the pullback reached; VWAP when it reached both
+            entry = float(v) if near_vwap else float(va_edge)
         else:
             entry = float(bar["high"] + contract.tick) if direction == "LONG" \
                 else float(bar["low"] - contract.tick)
@@ -515,13 +543,15 @@ def generate_s3(
                 "one_timeframing": True,            # s3_gate, at confirm_at
                 "delta_at_extreme": delta_at_extreme,
                 "vwap_crosses_ok": True,            # enforced bar by bar above
-                "pullback_to_vwap": True,
+                "pullback_to_level": True,          # VWAP or developing VA edge
                 "volume_declining": vol_declining,
                 "counter_delta_ok": counter_ok,
                 "stop_within_cap": True,
             },
             context={
-                "vwap": float(v), "day_type": lv.day_type,
+                "vwap": float(v), "pullback_level": level,
+                "va_edge": None if va_edge is None else float(va_edge),
+                "day_type": lv.day_type,
                 "ib_range_pts": lv.ib_range,
                 "otf_bars": max(lv.otf_up_bars, lv.otf_down_bars),
                 "vwap_crosses": int(crosses[i]),
@@ -532,6 +562,7 @@ def generate_s3(
         ))
         in_pullback = False
         last_touch_i = i
+        away_vwap = away_edge = False        # price must leave before the next pullback
     return out
 
 
