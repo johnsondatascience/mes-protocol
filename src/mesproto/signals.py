@@ -113,6 +113,9 @@ class Fill:
     # the exit depended on an intrabar order OHLC cannot show: stop and target
     # inside one bar, or a stop entry's fill bar that also spans the stop
     ambiguous_bar: bool = False
+    # last bar the ENTRY order was working: its fill bar, or the bar it was
+    # cancelled on. With exit_time, this says when the setup was free again.
+    order_end: Optional[datetime] = None
 
 
 # ---------------------------------------------------------------------------
@@ -645,12 +648,14 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
     sign = signal.sign
     entry_px: Optional[float] = None
     entry_time = None
+    order_end = signal.signal_time      # nothing has rested yet
 
     for j, (ts, bar) in enumerate(after.iterrows()):
         if j >= max_wait_bars:
             break
         if signal.entry_deadline is not None and ts.time() >= signal.entry_deadline:
             break                       # stand-down reached: the order is cancelled
+        order_end = ts                  # the order was working through this bar
         if signal.entry_style == "LIMIT":
             # must trade strictly through the limit, not merely touch it
             hit = bar["low"] < signal.entry_px if sign > 0 else bar["high"] > signal.entry_px
@@ -665,7 +670,7 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
                 break
 
     if entry_px is None:
-        return Fill(signal, filled=False)
+        return Fill(signal, filled=False, order_end=order_end)
 
     risk = abs(entry_px - signal.stop_px)
     target = entry_px + sign * MECHANICAL_TARGET_R * risk
@@ -681,7 +686,8 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
     if (fill_bar["low"] <= signal.stop_px) if sign > 0 \
             else (fill_bar["high"] >= signal.stop_px):
         return Fill(signal, True, entry_time, entry_px, entry_time,
-                    signal.stop_px, "STOP", 0, signal.entry_style == "STOP")
+                    signal.stop_px, "STOP", 0, signal.entry_style == "STOP",
+                    order_end=entry_time)
 
     held = 0
     ambiguous = False
@@ -694,14 +700,35 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
             ambiguous = True
         if hit_stop:                                  # stop wins ties, always
             return Fill(signal, True, entry_time, entry_px, ts, signal.stop_px,
-                        "STOP", held, ambiguous)
+                        "STOP", held, ambiguous, order_end=entry_time)
         if hit_tgt:
             return Fill(signal, True, entry_time, entry_px, ts, target,
-                        "TARGET", held, ambiguous)
+                        "TARGET", held, ambiguous, order_end=entry_time)
 
     last_ts, last_bar = rth.index[-1], rth.iloc[-1]
     return Fill(signal, True, entry_time, entry_px, last_ts,
-                float(last_bar["close"]), "TIME", held, ambiguous)
+                float(last_bar["close"]), "TIME", held, ambiguous, order_end=entry_time)
+
+
+def _simulate_one_position_per_setup(signals: Sequence[Signal], bars: pd.DataFrame,
+                                     contract: Contract) -> list[Fill]:
+    """Resolve signals in time order, skipping any that arrives while its setup
+    still has an order working or a position open (amended 2026-09-15).
+
+    One position at a time per setup is what a trader following the checklist
+    does. Stacking the same idea logs correlated trades as independent ones:
+    on the August 2026 ES tape four S1 shorts at one price were open at once.
+    """
+    busy: dict[str, pd.Timestamp] = {}
+    out: list[Fill] = []
+    for signal in sorted(signals, key=lambda s: s.signal_time):
+        until = busy.get(signal.setup)
+        if until is not None and signal.signal_time < until:
+            continue
+        fill = simulate(signal, bars, contract)
+        busy[signal.setup] = fill.exit_time if fill.filled else fill.order_end
+        out.append(fill)
+    return out
 
 
 def run_session(bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
@@ -709,8 +736,7 @@ def run_session(bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
                 news: Optional[NewsCalendar] = None) -> list[Fill]:
     signals = _ib_break_signals(bars, lv, contract, news) + \
         generate_s3(bars, lv, contract, entry_style=s3_entry_style)
-    signals.sort(key=lambda s: s.signal_time)
-    return [simulate(s, bars, contract) for s in signals]
+    return _simulate_one_position_per_setup(signals, bars, contract)
 
 
 def run_all(bars: pd.DataFrame, sessions: Sequence[SessionLevels],

@@ -981,6 +981,62 @@ def test_resting_entry_cancelled_at_stand_down():
     print("  order resting past 15:00 cancelled; S3 signals carry the deadline")
 
 
+# --- one position per setup (amended 2026-09-15) ------------------------------
+
+def _flat_day(drop_at_minute=None, drop_to=4980.0):
+    d = date(2026, 3, 3)
+    path = np.full(390, 5000.0)
+    if drop_at_minute is not None:
+        path[drop_at_minute:] = drop_to
+    return d, load_dataframe_bars(bars_from_path(d, path, wick=0.5), source="FUTURES")
+
+
+def _sig(d, hh, mm, setup="VWAP_CONT", entry=5000.0, stop=4990.0):
+    ts = pd.Timestamp.combine(d, time(hh, mm)).tz_localize(ET)
+    return Signal(setup=setup, session_date=d, direction="LONG", signal_time=ts,
+                  entry_px=entry, stop_px=stop, entry_style="LIMIT")
+
+
+def test_no_setup_holds_two_positions_at_once():
+    """A signal while the same setup already holds a position is not taken —
+    a trader following the checklist does not stack the same idea. Another
+    setup is unaffected."""
+    from mesproto.signals import _simulate_one_position_per_setup
+    d, bars = _flat_day()
+    first = _sig(d, 10, 30)                          # fills 10:31, open to the close
+    fills = _simulate_one_position_per_setup(
+        [_sig(d, 10, 40), first, _sig(d, 10, 40, setup="IB_BREAK")], bars, MES)
+    taken = [(f.signal.setup, f.signal.signal_time.time()) for f in fills]
+    assert taken == [("VWAP_CONT", time(10, 30)), ("IB_BREAK", time(10, 40))], taken
+    print(f"  taken: {taken}")
+
+
+def test_resting_order_blocks_the_setup_until_it_fills_or_expires():
+    from mesproto.config import ENTRY_MAX_WAIT_BARS
+    from mesproto.signals import _simulate_one_position_per_setup
+    d, bars = _flat_day()
+    resting = _sig(d, 10, 30, entry=4990.0, stop=4985.0)  # never trades through 4990
+    expires = (pd.Timestamp.combine(d, time(10, 30)) + pd.Timedelta(minutes=ENTRY_MAX_WAIT_BARS)).time()
+    during = _sig(d, 10, 45, entry=4990.0, stop=4985.0)
+    after = _sig(d, expires.hour, expires.minute + 1, entry=4990.0, stop=4985.0)
+    fills = _simulate_one_position_per_setup([resting, during, after], bars, MES)
+    got = [f.signal.signal_time.time() for f in fills]
+    assert got == [time(10, 30), after.signal_time.time()], got
+    assert fills[0].order_end.time() == expires, fills[0].order_end
+    print(f"  order resting 10:31-{expires} blocks 10:45; {after.signal_time.time()} is taken")
+
+
+def test_setup_is_free_again_after_its_trade_exits():
+    from mesproto.signals import _simulate_one_position_per_setup
+    d, bars = _flat_day(drop_at_minute=66)            # 10:36 drops through the stop
+    first = _sig(d, 10, 30, stop=4996.0)
+    later = _sig(d, 10, 50, entry=4980.0, stop=4975.0)
+    fills = _simulate_one_position_per_setup([first, later], bars, MES)
+    assert fills[0].exit_reason == "STOP" and fills[0].exit_time.time() == time(10, 36), fills[0]
+    assert [f.signal.signal_time.time() for f in fills] == [time(10, 30), time(10, 50)]
+    print("  stopped out 10:36 -> the 10:50 signal is taken")
+
+
 def test_log_failed_checks_and_notes():
     d = date(2026, 3, 3)
     ts = pd.Timestamp.combine(d, time(10, 30)).tz_localize(ET)

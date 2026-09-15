@@ -94,7 +94,14 @@ Data flow: `bars -> build_sessions -> run_all -> fills_to_log -> compute_r -> re
 7. **The bootstrap resamples sessions, not trades.** Trades within a session
    share a regime and share the trader's state. Switching to an i.i.d. bootstrap
    tightens every interval by roughly a third and is wrong.
-8. **Gates are decided at fixed checkpoints, on the trades that existed then.**
+8. **One position per setup, one order per IB edge.** `run_session` resolves
+   signals in time order through `_simulate_one_position_per_setup` and skips
+   any whose setup still has an order working or a position open; each IB edge
+   gives S1 and IB_FAIL one order per session. Both came from the first real
+   tape (August 2026 ES), where one edge was sold six times in an hour. Logging
+   several attempts at one idea as independent trades inflates the sample and
+   the confidence in it.
+9. **Gates are decided at fixed checkpoints, on the trades that existed then.**
    `futility_verdict` evaluates n = 60 on the first 60 primary trades and
    n = 150 on the first 150; a kill stays a kill. Burn-in (the first 30 trades
    of each setup, by time) counts toward those checkpoints: since the
