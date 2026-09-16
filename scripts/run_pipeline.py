@@ -4,14 +4,17 @@
     # from a CSV of 1-minute bars (SPY proxy or exported futures bars)
     python scripts/run_pipeline.py --csv data/spy_1min.csv --contract SPY
 
-    # from Databento TBBO (needs DATABENTO_API_KEY)
-    python scripts/run_pipeline.py --databento ESZ5 \
-        --start 2025-10-01 --end 2025-10-31 --contract MES
+    # from Databento TBBO (DATABENTO_API_KEY in the environment or .env). The
+    # download is saved under data/ and re-read on later runs, never re-bought;
+    # the run stops unless the side codes are confirmed against the quotes.
+    python scripts/run_pipeline.py --databento ESU6 \
+        --start 2026-07-30T22:00 --end 2026-08-31T21:00 --contract MES
 
 Writes data/generated_trades.csv and prints the evaluation report.
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -19,10 +22,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mesproto import (  # noqa: E402
     CONTRACTS, build_sessions, fills_to_log, load_csv_bars,
-    load_databento_tbbo, sessions_to_frame, validate,
+    load_databento_tbbo, load_news_calendar, load_reference_closes, sessions_to_frame,
+    validate,
 )
+from mesproto.config import ALPHA, BURN_IN_TRADES, MIN_EXPECTANCY_R  # noqa: E402
 from mesproto.evaluate import compute_r, report  # noqa: E402
+from mesproto.levels import aggressor_problem  # noqa: E402
 from mesproto.signals import run_all  # noqa: E402
+from mesproto.sources import read_api_key  # noqa: E402
 
 
 def main() -> int:
@@ -38,7 +45,23 @@ def main() -> int:
                     help="timezone the CSV timestamps are in")
     ap.add_argument("--s3-entry", default="LIMIT", choices=["LIMIT", "STOP"],
                     help="pre-registered S3 entry style; never change mid-sample")
+    ap.add_argument("--news-calendar", metavar="PATH", default="data/news_calendar.csv",
+                    help="built by scripts/fetch_news_calendar.py. S1 signals before "
+                         "10:30 on sessions it does not cover cannot verify the "
+                         "stand-down and are flagged out of the primary sample")
+    ap.add_argument("--reference-closes", metavar="PATH", default="data/sp500_close.csv",
+                    help="SPY only: S&P 500 daily closes from scripts/fetch_reference_closes.py, "
+                         "used to scale ES-point thresholds by the prior day's ratio")
+    ap.add_argument("--dbn", metavar="PATH",
+                    help="where the raw Databento download is kept; an existing file is "
+                         "read instead of re-bought (default: data/tbbo_<symbol>_<start>_<end>.dbn.zst)")
+    ap.add_argument("--sell-aggressor-code", default="A", choices=["A", "B"],
+                    help="Databento side code for a sell aggressor; checked against the quotes")
+    ap.add_argument("--env-file", default=".env",
+                    help="read DATABENTO_API_KEY from here if it is not in the environment")
     ap.add_argument("--contracts", type=int, default=1)
+    ap.add_argument("--burn-in", type=int, default=BURN_IN_TRADES,
+                    help="burn-in trades per setup, flagged (not excluded), applied uniformly")
     ap.add_argument("--out", default="data/generated_trades.csv")
     ap.add_argument("--n-boot", type=int, default=10000)
     args = ap.parse_args()
@@ -49,12 +72,42 @@ def main() -> int:
         source = "SPY" if args.contract == "SPY" else "FUTURES"
         bars = load_csv_bars(args.csv, source=source, tz=args.tz)
     else:
-        bars = load_databento_tbbo(symbols=args.databento, start=args.start,
-                                   end=args.end)
+        dbn = args.dbn or str(Path("data") / re.sub(
+            r"[^A-Za-z0-9_.-]", "", f"tbbo_{args.databento}_{args.start}_{args.end}.dbn.zst"))
+        print(("reading saved download " if Path(dbn).is_file()
+               else "downloading (billed by Databento) to ") + dbn)
+        Path(dbn).parent.mkdir(parents=True, exist_ok=True)
+        key = read_api_key(Path(args.env_file), name="DATABENTO_API_KEY") or None
+        bars = load_databento_tbbo(symbols=args.databento, start=args.start, end=args.end,
+                                   api_key=key, path=dbn,
+                                   sell_aggressor_code=args.sell_aggressor_code)
+        check = bars.attrs.get("aggressor_check")
+        problem = aggressor_problem(check, args.sell_aggressor_code)
+        if problem:
+            print(f"\nSTOP: delta sign not confirmed — {problem}.")
+            return 1
+        print(f"side codes confirmed against the quotes: sell aggressor = "
+              f"{check['sell_aggressor_code']!r} on {check['agreement']:.2%} of "
+              f"{check['classified']:,} trades at the bid or ask")
 
-    sessions = build_sessions(bars, tick=contract.tick)
+    is_spy = bars.attrs.get("source") == "SPY"
+    reference = None
+    if is_spy:
+        if Path(args.reference_closes).is_file():
+            reference = load_reference_closes(args.reference_closes)
+        else:
+            print(f"warn: no reference closes at {args.reference_closes} — run "
+                  f"scripts/fetch_reference_closes.py. Without them no SPY session can "
+                  f"scale the ES-point thresholds, so S1, IB_FAIL and S3 generate nothing.")
+
+    sessions = build_sessions(bars, tick=contract.tick, reference_closes=reference)
     print(f"built {len(sessions)} sessions from {len(bars):,} bars "
           f"({bars.index[0]} .. {bars.index[-1]})")
+    if is_spy:
+        unscaled = sum(s.point_scale is None for s in sessions)
+        if unscaled:
+            print(f"warn: {unscaled} of {len(sessions)} SPY sessions have no reference "
+                  f"close for the prior day; S1, IB_FAIL and S3 skip them.")
     sf = sessions_to_frame(sessions)
     if not sf.empty:
         print("\nday types:")
@@ -63,7 +116,21 @@ def main() -> int:
               f"S2 {sf['s2_gate'].mean():.0%}  S3 {sf['s3_gate'].mean():.0%}  "
               f"S5 {sf['s5_gate'].mean():.0%}")
 
-    fills = run_all(bars, sessions, contract, s3_entry_style=args.s3_entry)
+    news = None
+    if Path(args.news_calendar).is_file():
+        news = load_news_calendar(args.news_calendar)
+        print(f"\nnews calendar {news.start} .. {news.end}: {', '.join(sorted(news.events))}")
+        uncovered = sum(not news.start <= s.date <= news.end for s in sessions)
+        if uncovered:
+            print(f"warn: {uncovered} of {len(sessions)} sessions fall outside the news "
+                  f"calendar — re-run scripts/fetch_news_calendar.py. Their S1 signals "
+                  f"before 10:30 ET get no_news_stand_down=None.")
+    else:
+        print(f"\nwarn: no news calendar at {args.news_calendar} — run "
+              f"scripts/fetch_news_calendar.py. S1 signals before 10:30 ET get "
+              f"no_news_stand_down=None and are excluded from the primary analysis.")
+
+    fills = run_all(bars, sessions, contract, s3_entry_style=args.s3_entry, news=news)
     log = fills_to_log(fills, contract, contracts=args.contracts)
     if log.empty:
         print("\nno signals generated — check the gates above before assuming a bug")
@@ -80,14 +147,17 @@ def main() -> int:
 
     scored = compute_r(log)
     scored["session_date"] = scored["session_date"].astype("datetime64[ns]")
-    report(scored, min_exp=0.15, alpha=0.01, n_boot=args.n_boot)
+    report(scored, min_exp=MIN_EXPECTANCY_R, alpha=ALPHA, n_boot=args.n_boot,
+           burn_in=args.burn_in)
 
     amb = log["notes"].str.contains("ambiguous_bar").sum()
     if amb:
-        print(f"NOTE: {amb} trades resolved on a bar containing both stop and "
-              f"target. Those were scored as losses by convention; if they are a "
-              f"large share of the sample, the bar-level result is unreliable and "
-              f"only replay can settle it.")
+        print(f"NOTE: {amb} of {len(log)} trades ({amb / len(log):.0%}) resolved on "
+              f"a bar whose intrabar order OHLC cannot show (stop and target in "
+              f"one bar, or a stop entry's fill bar spanning the stop). Those were "
+              f"scored as losses by convention; if they are a large share of the "
+              f"sample, the bar-level result is unreliable and only replay can "
+              f"settle it.")
     return 0
 
 

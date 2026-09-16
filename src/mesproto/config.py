@@ -7,7 +7,7 @@ or a hardcoded time anywhere else, that is a bug — move it here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import time
+from datetime import date, time
 
 try:
     from zoneinfo import ZoneInfo
@@ -22,9 +22,19 @@ RTH_CLOSE = time(16, 0)
 IB_END = time(10, 0)
 ON_OPEN = time(18, 0)            # CME equity index reopen, prior calendar day
 DAY_TYPE_CUTOFF = time(11, 0)    # classify here. NEVER at the close.
+OTF_BAR_MINUTES = 30             # one-timeframing is read on 30-minute bars
+
+# --- levels -------------------------------------------------------------------
+VALUE_AREA_PCT = 0.70            # share of session volume inside VAL..VAH
+DOUBLE_DIST_RANGE_MULT = 2.0     # pre-cutoff range beyond this x IB (with chop) = DOUBLE_DIST
+S5_ON_EXTREME_PCT = 0.15         # 09:30 in the top/bottom 15% of the overnight range
+
+# --- fill simulation ----------------------------------------------------------
+ENTRY_MAX_WAIT_BARS = 30         # a resting entry unfilled after this many bars is cancelled
 
 # --- setup-specific windows ---------------------------------------------------
 S1_BREAK_WINDOW = (time(10, 0), time(11, 30))
+S1_NEWS_STAND_DOWN_UNTIL = time(10, 30)   # on days carrying any of S1_NEWS_EVENTS
 S3_ENTRY_CUTOFF = time(15, 0)
 S4_NO_TRADE_OPEN = time(9, 35)   # first 5 minutes
 S4_NO_TRADE_CLOSE = time(15, 45)  # last 15 minutes
@@ -68,27 +78,102 @@ SPY = Contract(  # proxy for prototyping only — no overnight session
 
 CONTRACTS = {c.symbol: c for c in (MES, ES, SPY)}
 
+# --- scheduled-release calendar ---------------------------------------------
+# The calendar may carry more event types than any rule watches. Which ones a
+# stand-down watches is pre-registered: changing S1_NEWS_EVENTS restarts S1.
+FOMC_EVENT = "FOMC"                       # statement day of a scheduled meeting
+NEWS_FRED_RELEASES = {                    # event -> FRED release_id
+    "CPI": 10,                            # Consumer Price Index (BLS)
+    "NFP": 50,                            # Employment Situation (BLS)
+    "PPI": 46,                            # Producer Price Index (BLS)
+    "RETAIL_SALES": 9,                    # Advance Monthly Sales for Retail and Food Services
+}
+S1_NEWS_EVENTS = (FOMC_EVENT, "CPI", "NFP", "PPI", "RETAIL_SALES")   # PPI, retail sales
+                                                                    # added 2026-09-15
+NEWS_CALENDAR_START = date(2015, 1, 1)    # default first day the fetch script covers
+NEWS_CALENDAR_LAG_DAYS = 1                # coverage ends this many days before the fetch:
+                                          # FRED lists a release only once its data loads
+FRED_RELEASE_DATES_URL = "https://api.stlouisfed.org/fred/release/dates"
+FRED_MAX_LIMIT = 10000
+FRED_SERIES_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
+FRED_OBSERVATIONS_MAX_LIMIT = 100000
+FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+FOMC_HISTORICAL_URL = "https://www.federalreserve.gov/monetarypolicy/fomchistorical{year}.htm"
+HTTP_TIMEOUT_S = 30
+HTTP_USER_AGENT = "mesproto/0.1 (research; +https://github.com/johnsondatascience/mes-protocol)"
+
+# --- SPY proxy point scaling (added 2026-09-15) -----------------------------
+# Setup thresholds are ES points. A SPY session multiplies every one of them by
+# SPY's prior-day close / the reference close on that same prior day. FRED's
+# S&P 500 index close stands in for ES: the two differ by well under 1%, at most
+# about one SPY cent on the widest threshold. FRED keeps 10 years of it.
+SPY_REFERENCE_SERIES = "SP500"
+
+# exits filled by a stop order pay slippage_ticks_stop: a breakeven exit is a
+# moved stop being hit, so it pays too. Market (MANUAL) exits are not charged.
+STOP_ORDER_EXITS = ("STOP", "BREAKEVEN")
+
 # --- statistical protocol -----------------------------------------------------
 MIN_EXPECTANCY_R = 0.15   # below this, not worth trading after costs
-N_SETUPS_TESTED = 5       # Bonferroni denominator
+N_SETUPS_TESTED = 5       # Bonferroni denominator: the protocol's five setups
+# Reported, never judged (decided 2026-09-15): outside the Bonferroni family,
+# no gate verdict, no confirmation claim, not in the portfolio. A promising
+# exploratory result needs its own pre-registered sample before it counts.
+EXPLORATORY_SETUPS = ("IB_FAIL",)
 ALPHA = 0.05 / N_SETUPS_TESTED
+# Sessions used to validate the tooling and read trade by trade. Rules were
+# settled after seeing them, so they can never be part of a study sample:
+# primary_sample drops them and the report says so. (start, end, why)
+VALIDATION_PERIODS = (
+    (date(2026, 7, 30), date(2026, 8, 31),
+     "ES (ESU6) August 2026: first real-data run; inspected trade by trade, and "
+     "the one-order-per-edge and one-position-per-setup rules came out of it"),
+)
 ASSUMED_SIGMA_R = 1.5     # for planning only; the bootstrap uses the real thing
-BURN_IN_TRADES = 30       # per setup, excluded from primary analysis
+BURN_IN_TRADES = 30       # per setup, flagged and INCLUDED in primary (amended 2026-09-15)
 FUTILITY_GATES = (60, 150)  # checkpoints at which the kill rule is applied
+GATE_CONFIDENCE = 0.80    # kill when the one-sided upper bound on mean R < MIN_EXPECTANCY_R
+GATE_SIGMA_FLOOR_R = 0.6 * ASSUMED_SIGMA_R  # a calm start cannot shrink the gate's bound
+BOOTSTRAP_CI = 0.95       # §06: report the 2.5/97.5 session-block percentiles
+CONFIRM_POWER = 0.80      # §01: power behind the confirmation sample size
+
+# --- reporting only (never feed a verdict) -------------------------------------
+CONFIRM_N_MIN_EFFECT_R = 0.05   # floor on the effect used for "n to confirm"
+CONFIRM_N_MIN_SIGMA_R = 1.0     # floor on the sigma used for "n to confirm"
+DAY_TYPE_MIN_TRADES = 5         # smallest day-type bucket worth printing
+OFF_CHECKLIST_WARN_FRAC = 0.25  # validate() warns above this share of checklist_ok=0
+AGGRESSOR_MIN_AGREEMENT = 0.95  # side codes must match the quotes on this share of
+AGGRESSOR_MIN_CLASSIFIED = 1000  # at least this many at-bid/at-ask trades before delta is trusted
+EXTERNAL_MIN_BARS = 60          # overlapping minutes needed before an external export is judged
+EXTERNAL_DELTA_MIN_CORR = 0.90  # |correlation| above which its delta is called same/inverted
+GAP_OPEN_PCT = 0.01             # |open / prior close - 1| beyond this is a gap-open session:
+                                # a different regime, reported separately but INCLUDED
+                                # in the primary sample (amended 2026-09-15)
 
 # --- setup parameters (pre-registered — changing one restarts the sample) -----
 S1_IB_RANGE_MIN_PCT = 0.0025
 S1_IB_RANGE_MAX_PCT = 0.0075
 S1_DELTA_CONFIRM_BARS = 3
 S1_RETEST_MAX_REENTRY_PTS = 2.0
+S1_STOP_BEYOND_SWING_PTS = 1.0
 S1_STOP_FLOOR_PTS = 4.0
 S1_STOP_CAP_PTS = 8.0
+
+# IB_FAIL (added 2026-09-15): the S1 break whose retest fails — a bar closes more
+# than S1_RETEST_MAX_REENTRY_PTS back inside, within S1_BREAK_WINDOW. Traded the
+# other way: stop entry 1 tick beyond the failure bar, stop beyond the false break.
+IB_FAIL_STOP_BEYOND_EXTREME_PTS = 1.0
+IB_FAIL_STOP_FLOOR_PTS = 4.0
+IB_FAIL_STOP_CAP_PTS = 8.0
 
 S3_MIN_OTF_BARS = 2
 S3_MAX_VWAP_CROSSES = 3
 S3_VWAP_TOLERANCE_PTS = 2.0
+S3_VA_EDGE_TOLERANCE_PTS = 2.0   # pullback to the developing value-area edge (added 2026-09-15)
+S3_LVN_MAX_FRAC_OF_POC = 0.25    # low-volume node: under this share of the POC's volume (added 2026-09-15)
 S3_MAX_COUNTER_DELTA_FRAC = 0.40
 S3_STOP_FLOOR_PTS = 5.0
 S3_STOP_CAP_PTS = 10.0
 
 MECHANICAL_TARGET_R = 2.0
+PRICE_EPS = 1e-6          # float tolerance when a logged price must equal a computed one

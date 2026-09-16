@@ -160,6 +160,259 @@ def test_no_lookahead():
           f"{before.rth_high:.2f} -> {after.rth_high:.2f}")
 
 
+def test_zero_width_overnight_range_has_no_position():
+    """A range with no width has no 'where in the range'. 0.5 is a plausible
+    substitute, which invariant 2 forbids."""
+    d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
+    today = make_session(d1, trend_path(5060.0), on_center=5060.0)
+    on = today.index < pd.Timestamp.combine(d1, time(9, 30)).tz_localize(ET)
+    today.loc[on, ["open", "high", "low", "close"]] = 5060.0
+    s = {x.date: x for x in build_sessions(
+        build([make_session(d0, balance_path(5000.0)), today]), tick=TICK)}[d1]
+    assert s.on_high == s.on_low == 5060.0
+    assert s.on_range_pos is None, s.on_range_pos
+    assert s.s5_gate() is False
+    print("  flat overnight -> on_range_pos None")
+
+
+def test_prior_close_and_gap():
+    d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
+    prior = make_session(d0, balance_path(5000.0))
+    today = make_session(d1, trend_path(5060.0), on_center=5060.0)
+    sessions = {s.date: s for s in build_sessions(build([prior, today]), tick=TICK)}
+    assert sessions[d0].prior_close is None, "first session has no prior close"
+    assert sessions[d0].gap_pct is None
+    assert sessions[d1].prior_close == sessions[d0].rth_close
+    expected = (sessions[d1].open_px - sessions[d0].rth_close) / sessions[d0].rth_close
+    assert abs(sessions[d1].gap_pct - expected) < 1e-12
+    print(f"  prior_close={sessions[d1].prior_close:.2f} gap={sessions[d1].gap_pct:+.3%}")
+
+
+def test_csv_loader_offsets_across_dst():
+    """ET exports with UTC offsets change offset at DST. Both offset-carrying
+    and naive (exchange-local) timestamps must land on the same ET clock."""
+    import os
+    import tempfile
+    from mesproto.levels import load_csv_bars
+
+    rows = "open,high,low,close,volume\n"
+    with_offsets = ("timestamp," + rows
+                    + "2026-03-06 09:30:00-05:00,1,2,0.5,1.5,10\n"
+                    + "2026-03-09 09:30:00-04:00,1,2,0.5,1.5,10\n")
+    naive = ("timestamp," + rows
+             + "2026-03-06 09:30:00,1,2,0.5,1.5,10\n"
+             + "2026-03-09 09:30:00,1,2,0.5,1.5,10\n")
+    for body in (with_offsets, naive):
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            bars = load_csv_bars(path, source="FUTURES")
+        finally:
+            os.remove(path)
+        assert [ts.time() for ts in bars.index] == [time(9, 30), time(9, 30)], bars.index
+        assert str(bars.index.tz) == "America/New_York"
+    print("  offset-carrying and naive timestamps both land on 09:30 ET across DST")
+
+
+def _tbbo_frame(rows):
+    """rows: (ts_recv, ts_event, price, size, side, instrument_id)."""
+    df = pd.DataFrame(rows, columns=["ts_recv", "ts_event", "price", "size", "side",
+                                     "instrument_id"])
+    for c in ("ts_recv", "ts_event"):
+        df[c] = pd.to_datetime(df[c], utc=True, format="ISO8601")
+    return df.set_index("ts_recv")
+
+
+def _tbbo_quotes(rows):
+    """rows: (ts_event, price, side, bid, ask) — TBBO carries the BBO at each trade."""
+    df = pd.DataFrame(rows, columns=["ts_event", "price", "side", "bid_px_00", "ask_px_00"])
+    df["ts_event"] = pd.to_datetime(df["ts_event"], utc=True)
+    df["size"], df["instrument_id"] = 1, 1
+    return df.set_index("ts_event", drop=False)
+
+
+def test_aggressor_convention_is_read_from_the_quotes():
+    """A trade at the ask was a buyer lifting it; at the bid, a seller hitting
+    it. The side codes on those trades say which letter means sell — checked
+    from the data itself, before any delta condition is trusted."""
+    from mesproto.levels import aggressor_convention
+    t = "2026-08-03 14:30:00"
+    rows = [(t, 5000.25, "B", 5000.00, 5000.25)] * 60 \
+        + [(t, 5000.00, "A", 5000.00, 5000.25)] * 40 \
+        + [(t, 5000.25, "A", 5000.00, 5000.25)] * 2 \
+        + [(t, 5000.10, "N", 5000.00, 5000.25)] * 5      # inside the spread: unclassifiable
+    got = aggressor_convention(_tbbo_quotes(rows))
+    assert got["sell_aggressor_code"] == "A" and got["classified"] == 102, got
+    assert abs(got["agreement"] - 100 / 102) < 1e-12, got
+
+    flipped = [(ts, px, {"A": "B", "B": "A"}.get(s, s), b, a) for ts, px, s, b, a in rows]
+    assert aggressor_convention(_tbbo_quotes(flipped))["sell_aggressor_code"] == "B"
+    print(f"  {got}")
+
+
+def test_aggressor_problem_blocks_a_contradicted_or_thin_check():
+    from mesproto.config import AGGRESSOR_MIN_AGREEMENT, AGGRESSOR_MIN_CLASSIFIED
+    from mesproto.levels import aggressor_problem
+    ok = {"sell_aggressor_code": "A", "agreement": 0.999, "classified": 50_000}
+    assert aggressor_problem(ok, "A") is None
+    assert "B" in aggressor_problem({**ok, "sell_aggressor_code": "B"}, "A")
+    assert aggressor_problem({**ok, "agreement": AGGRESSOR_MIN_AGREEMENT - 0.01}, "A")
+    assert aggressor_problem({**ok, "classified": AGGRESSOR_MIN_CLASSIFIED - 1}, "A")
+    assert aggressor_problem(None, "A"), "a tape that was never checked is not a pass"
+    print("  wrong code, low agreement, too few trades, or no check -> blocked")
+
+
+class _FakeStore:
+    def __init__(self, df, symbols):
+        self._df, self.symbols = df, symbols
+
+    def to_df(self):
+        return self._df
+
+
+def _fake_databento(df, calls):
+    import types
+
+    class Historical:
+        def __init__(self, key=None):
+            calls.append("client")
+            self.timeseries = types.SimpleNamespace(get_range=self._get_range)
+
+        @staticmethod
+        def _get_range(**kw):
+            calls.append(("get_range", kw))
+            if kw.get("path"):
+                open(kw["path"], "wb").write(b"dbn")
+            return _FakeStore(df, [kw["symbols"]])
+
+    class DBNStore:
+        @staticmethod
+        def from_file(path):
+            calls.append(("from_file", str(path)))
+            return _FakeStore(df, ["ESU6"])
+
+    return types.SimpleNamespace(Historical=Historical, DBNStore=DBNStore)
+
+
+def test_databento_download_is_saved_and_never_bought_twice():
+    """A TBBO month costs real money. The first call streams it to `path`;
+    any later call with that path reads the file and makes no request."""
+    import os
+    import sys
+    import tempfile
+    from mesproto.levels import load_databento_tbbo
+    t = "2026-08-03 14:30:00"
+    df = _tbbo_quotes([(t, 5000.25, "B", 5000.00, 5000.25), (t, 5000.00, "A", 5000.00, 5000.25)])
+    calls: list = []
+    saved = sys.modules.get("databento")
+    sys.modules["databento"] = _fake_databento(df, calls)
+    path = os.path.join(tempfile.mkdtemp(), "esu6.dbn.zst")
+    try:
+        first = load_databento_tbbo(symbols="ESU6", start="2026-08-03", end="2026-08-04", path=path)
+        assert [c[0] for c in calls if isinstance(c, tuple)] == ["get_range"], calls
+        assert calls[-1][1]["path"] == path and os.path.isfile(path)
+        assert first.attrs["aggressor_check"]["sell_aggressor_code"] == "A"
+
+        calls.clear()
+        again = load_databento_tbbo(symbols="ESU6", start="2026-08-03", end="2026-08-04", path=path)
+        assert calls == [("from_file", path)], "a saved download must not be requested again"
+        assert len(again) == len(first)
+
+        try:
+            load_databento_tbbo(symbols="ESZ6", start="2026-08-03", end="2026-08-04", path=path)
+        except ValueError as e:
+            assert "ESZ6" in str(e), e
+        else:
+            raise AssertionError("a saved file for another contract must not be reused")
+    finally:
+        if saved is None:
+            sys.modules.pop("databento", None)
+        else:
+            sys.modules["databento"] = saved
+        os.remove(path)
+    print("  first call downloads to disk; second reads the file; wrong contract refused")
+
+
+def test_tbbo_unsided_trades_are_not_buys():
+    """Databento marks side N where the source gives none (auctions, some
+    opening prints). Counting those as buy aggression biases every delta up."""
+    from mesproto.levels import tbbo_to_bars
+    t0 = "2026-03-03 14:30:10"
+    trades = _tbbo_frame([
+        (t0, t0, 5000.00, 5, "B", 1),
+        (t0, t0, 5000.25, 3, "A", 1),
+        (t0, t0, 5000.00, 40, "N", 1),
+    ])
+    bars = tbbo_to_bars(trades)
+    bar = bars.iloc[0]
+    assert bar["volume"] == 48, bar["volume"]
+    assert bar["buy_volume"] == 5 and bar["sell_volume"] == 3, bar
+    assert bars.attrs["has_delta"]
+    print(f"  B=5 A=3 N=40 -> buy={bar['buy_volume']:.0f} sell={bar['sell_volume']:.0f} "
+          f"volume={bar['volume']:.0f}")
+
+
+def test_tbbo_bars_are_timed_by_ts_event():
+    """to_df() indexes by ts_recv (capture server). The matching-engine time
+    is ts_event; a trade at 09:30:59.999 must not slide into the 09:31 bar."""
+    from mesproto.levels import tbbo_to_bars
+    trades = _tbbo_frame([
+        ("2026-03-03 14:31:00.004", "2026-03-03 14:30:59.999", 5000.0, 1, "B", 1),
+        ("2026-03-03 14:31:10", "2026-03-03 14:31:10", 5001.0, 1, "B", 1),
+    ])
+    bars = tbbo_to_bars(trades)
+    assert [ts.time() for ts in bars.index] == [time(9, 30), time(9, 31)], bars.index
+    print("  trade stamped 09:30:59.999 by the exchange lands in the 09:30 bar")
+
+
+def test_tbbo_rejects_unknown_aggressor_code():
+    from mesproto.levels import tbbo_to_bars
+    trades = _tbbo_frame([("2026-03-03 14:30:10", "2026-03-03 14:30:10", 5000.0, 1, "B", 1)])
+    try:
+        tbbo_to_bars(trades, sell_aggressor_code="S")
+    except ValueError:
+        print("  sell_aggressor_code must be A or B")
+        return
+    raise AssertionError("an unknown aggressor code would silently zero one side")
+
+
+def test_tbbo_roll_inside_range_warns():
+    import warnings
+    from mesproto.levels import tbbo_to_bars
+    trades = _tbbo_frame([
+        ("2026-03-12 14:30:10", "2026-03-12 14:30:10", 5000.0, 1, "B", 101),
+        ("2026-03-13 14:30:10", "2026-03-13 14:30:10", 5040.0, 1, "B", 202),
+    ])
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        tbbo_to_bars(trades)
+    assert any("roll" in str(x.message).lower() for x in w), [str(x.message) for x in w]
+    print("  two instrument_ids in one tape -> roll warning")
+
+
+def test_databento_symbology_guards_single_expiry():
+    import warnings
+    from mesproto.levels import databento_symbology
+
+    assert databento_symbology("ESZ5") == ("ESZ5", "raw_symbol")
+    assert databento_symbology(["MESH6"]) == ("MESH6", "raw_symbol")
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        assert databento_symbology("ES.c.0") == ("ES.c.0", "continuous")
+    assert any("continuous" in str(x.message).lower() for x in w), \
+        "a continuous symbol must warn loudly"
+
+    for bad in (["ESZ5", "ESH6"], "ES.FUT", "ESZ5-ESH6", "ESZ5,ESH6"):
+        try:
+            databento_symbology(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"{bad!r} mixes instruments into one tape and must be refused")
+    print("  single expiry ok; continuous warns; parent/spread/multi refused")
+
+
 def test_spy_has_no_overnight():
     d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
     prior = make_session(d0, balance_path(500.0), overnight=False)
@@ -173,6 +426,74 @@ def test_spy_has_no_overnight():
     assert s.on_high is None and s.on_range_pos is None
     assert s.s5_gate() is False
     print("  SPY: overnight fields None, s5_gate False, warning raised")
+
+
+# --- SPY point scaling (added 2026-09-15) -----------------------------------
+
+def _spy_two_days():
+    d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
+    prior = make_session(d0, balance_path(500.0), overnight=False)
+    today = make_session(d1, trend_path(504.0, slope=0.003), overnight=False)
+    return build([prior, today], source="SPY"), d0, d1
+
+
+def _sessions_quiet(bars, **kw):
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return {s.date: s for s in build_sessions(bars, **kw)}
+
+
+def test_spy_point_scale_uses_prior_day_closes():
+    """ES-point thresholds become SPY points by the ratio of the two closes on
+    the PRIOR trading day — today's close is not known at 10:00."""
+    bars, d0, d1 = _spy_two_days()
+    spy_close_d0 = float(bars[bars.index.date == d0]["close"].iloc[-1])
+    ref = {d0: spy_close_d0 * 10.05, d1: 99999.0}      # d1's own close must not be used
+    s = _sessions_quiet(bars, tick=0.01, reference_closes=ref)
+    assert s[d0].point_scale is None, "no prior day, no ratio"
+    assert abs(s[d1].point_scale - 1 / 10.05) < 1e-12, s[d1].point_scale
+    print(f"  SPY {spy_close_d0:.2f} / S&P {ref[d0]:.2f} -> scale {s[d1].point_scale:.5f}")
+
+
+def test_spy_point_scale_is_none_without_a_reference_close():
+    """Invariant 2: no reference close for the prior day means no ratio — never
+    a guessed 1/10."""
+    bars, d0, d1 = _spy_two_days()
+    assert _sessions_quiet(bars, tick=0.01)[d1].point_scale is None
+    assert _sessions_quiet(bars, tick=0.01,
+                           reference_closes={d1: 5040.0})[d1].point_scale is None
+    print("  no reference for the prior day -> point_scale None")
+
+
+def test_futures_point_scale_is_one():
+    d0, d1 = date(2026, 3, 2), date(2026, 3, 3)
+    bars = build([make_session(d0, balance_path(5000.0)), make_session(d1, trend_path(5040.0))])
+    s = {x.date: x for x in build_sessions(bars, tick=TICK)}
+    assert s[d0].point_scale == 1.0 and s[d1].point_scale == 1.0
+    print("  futures: thresholds are already in ES points")
+
+
+def test_load_reference_closes():
+    import os
+    import tempfile
+    from mesproto.levels import load_reference_closes
+    fd, path = tempfile.mkstemp(suffix=".csv")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("# S&P 500 close (FRED SP500)\ndate,close\n2026-03-02,5012.5\n2026-03-03,5031.25\n")
+        assert load_reference_closes(path) == {date(2026, 3, 2): 5012.5, date(2026, 3, 3): 5031.25}
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("2026-03-04,n/a\n")
+        try:
+            load_reference_closes(path)
+        except ValueError as e:
+            assert ":5:" in str(e), e
+        else:
+            raise AssertionError("a malformed close must not be skipped")
+    finally:
+        os.remove(path)
+    print("  comments/header skipped; malformed row raises with its line")
 
 
 def test_futures_overnight_and_delta():
