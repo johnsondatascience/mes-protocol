@@ -159,6 +159,12 @@ with no API to query, so the check goes through a file it writes:
 4. `python scripts/compare_optimus_export.py --export <their.csv> --dbn <our.dbn.zst>`
    (add `--tz` if the export is not in ET).
 
+The export's **last bar** often lumps in whatever remained in the requested
+window, so expect one mismatched minute at the boundary. A real ESU6 export
+(2026-08-12, UTC timestamps) matched our Databento bars on volume for 1,380 of
+1,381 minutes, that boundary bar being the only exception, with identical
+closes throughout.
+
 It reports overlapping minutes, how often volume agrees, and whether their
 delta runs the same way as ours or the opposite way — the hand-logged setups
 (S2, S4) are read in that platform, so an inverted convention would make

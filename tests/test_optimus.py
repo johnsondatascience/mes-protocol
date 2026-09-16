@@ -54,6 +54,28 @@ def test_export_with_one_timestamp_column_and_ask_bid_volume():
     print(f"  delta from ask/bid volume: {got['delta'].tolist()}")
 
 
+def test_history_exporter_header_from_optimus_flow():
+    """The real header from Optimus Flow's History Exporter (ESU6 Rithmic,
+    1m): semicolon-separated with a trailing separator, the bar's own time in
+    'Time left' and the bar's end in 'Time right', and no volume analysis."""
+    path = _write(
+        "Time left;Time right;Open;High;Median;Low;Close;Typical;Volume;"
+        "Quote asset volume;Weighted;\n"
+        "2026-08-12 13:30:00.000;2026-08-12 13:30:59.999;7765.5;7766.0;7765.25;"
+        "7764.5;7765.75;7765.4;11725;0;7765.5\n"
+        "2026-08-12 13:31:00.000;2026-08-12 13:31:59.999;7765.75;7767.0;7766.0;"
+        "7765.0;7766.5;7766.1;8673;0;7766.2\n")
+    try:
+        got = load_optimus_export(path, tz="UTC")
+    finally:
+        os.remove(path)
+    assert got.index[0] == pd.Timestamp("2026-08-12 09:30", tz=ET), got.index[0]
+    assert "delta" not in got.columns, "this export carries no volume analysis"
+    assert got["volume"].tolist() == [11725, 8673]
+    assert got.attrs["columns_found"]["volume"] == "Volume"
+    print(f"  'Time left' 13:30 UTC -> {got.index[0]:%H:%M %Z}, volume {got['volume'].tolist()}")
+
+
 def test_export_timezone_is_explicit():
     """The export carries the platform's display time, not ours."""
     path = _write("DateTime,Open,High,Low,Close,Volume\n"

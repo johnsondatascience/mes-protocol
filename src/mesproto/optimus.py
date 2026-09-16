@@ -15,7 +15,6 @@ comparing them would be meaningless.
 
 from __future__ import annotations
 
-import csv
 from typing import Optional
 
 import numpy as np
@@ -26,7 +25,10 @@ from .config import ET, EXTERNAL_DELTA_MIN_CORR, EXTERNAL_MIN_BARS
 # lower-cased header -> our name. Quantower writes these differently depending
 # on the panel: a chart export, the History Exporter and the footprint panel
 # all spell volume analysis their own way.
-_TIMESTAMP = ("datetime", "date time", "timestamp", "time stamp", "date/time")
+# "time left" is the bar's own timestamp in the History Exporter ("time right"
+# is the bar's end, which would shift every bar by a minute).
+_TIMESTAMP = ("datetime", "date time", "timestamp", "time stamp", "date/time",
+              "time left", "open time", "bar time")
 _DATE, _TIME = ("date",), ("time",)
 _ALIASES = {
     "open": ("open", "o"),
@@ -41,12 +43,13 @@ _ALIASES = {
 
 
 def _sniff_separator(path: str) -> str:
+    """The separator the header uses. csv.Sniffer mis-reads a header that ends
+    in its own separator, which this export does, so count instead."""
     with open(path, encoding="utf-8-sig", newline="") as fh:
-        sample = fh.read(4096)
-    try:
-        return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
-    except csv.Error:
-        return ","
+        header = fh.readline()
+    counts = {sep: header.count(sep) for sep in (";", "\t", "|", ",")}
+    best = max(counts, key=counts.get)
+    return best if counts[best] else ","
 
 
 def load_optimus_export(path: str, tz: str = "America/New_York") -> pd.DataFrame:
