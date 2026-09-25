@@ -311,7 +311,7 @@
     <li><span class="h">Replay at 1× to 2×, and place real orders through the DOM.</span><p>Speed suppresses the hesitation that costs you fills live. Use bracket orders with the same defaults you would use with money on.</p></li>
     <li><span class="h">One decision per bar, no re-runs.</span><p>If you pause to think, the bar is over. Rewinding to re-take a trade invalidates the session for the entire study, not just that trade.</p></li>
     <li><span class="h">Log a mechanical exit alongside your managed exit.</span><p>Record the fixed 1:2 outcome for <em>every</em> trade regardless of how you actually managed it. The mechanical series is what the statistics run on; the managed series measures your discretion, and mixing them makes both unreadable.</p></li>
-    <li><span class="h">Mark the first 30 trades of each setup as burn-in.</span><p>Your reading skill is non-stationary across a six-month study — the early trades and late trades are not draws from the same distribution. Pre-register the burn-in exclusion now so it isn't a post-hoc convenience later.</p></li>
+    <li><span class="h">Mark the first 30 trades of each setup as burn-in.</span><p>Your reading skill is non-stationary across a six-month study — the early trades and late trades are not draws from the same distribution. Burn-in trades stay in the primary analysis, flagged, and the result is also reported without them so the drift is visible (amended — see §09).</p></li>
   </ol>
 </section>
 
@@ -327,14 +327,17 @@
         <tr><td class="mono-c">session_date</td><td>date</td><td>Bootstrap blocking unit — trades within a session are correlated</td></tr>
         <tr><td class="mono-c">setup</td><td>enum</td><td>IB_BREAK · LEVEL2LEVEL · VWAP_CONT · ABSORPTION · ON_INVENTORY</td></tr>
         <tr><td class="mono-c">direction</td><td>LONG/SHORT</td><td>Checks for a directional bias in your reads</td></tr>
+        <tr><td class="mono-c">contract</td><td>MES/ES/SPY</td><td>Execution vehicle; its commission and slippage score the trade</td></tr>
         <tr><td class="mono-c">entry_time</td><td>HH:MM:SS ET</td><td>Time-of-day conditioning</td></tr>
         <tr><td class="mono-c">entry_px, stop_px</td><td>float</td><td>Defines R. Stop is the bracket as placed, never as later moved</td></tr>
-        <tr><td class="mono-c">exit_px, exit_reason</td><td>float, enum</td><td>TARGET · STOP · TIME · MANUAL · BREAKEVEN</td></tr>
-        <tr><td class="mono-c">mech_exit_R</td><td>float</td><td>The fixed 1:2 outcome, logged for every trade</td></tr>
+        <tr><td class="mono-c">exit_px, exit_reason</td><td>float, enum</td><td>The exit you actually took. TARGET · STOP · TIME · MANUAL · BREAKEVEN</td></tr>
+        <tr><td class="mono-c">mech_exit_px, mech_exit_reason</td><td>float, enum</td><td>The fixed 1:2 outcome, logged for every trade: the stop, exactly 2R, or the time-exit price. TARGET · STOP · TIME. <code>mech_exit_R</code> is computed from these, never typed</td></tr>
         <tr class="hi"><td class="mono-c">day_type</td><td>enum</td><td>TREND_UP · TREND_DOWN · BALANCE · DOUBLE_DIST — classified at 11:00 ET, never at the close</td></tr>
         <tr><td class="mono-c">ib_range_pts</td><td>float</td><td>Regime covariate; also the S1 filter</td></tr>
         <tr><td class="mono-c">on_range_pos</td><td>0–1</td><td>Where 09:30 sat in the overnight range — the S5 covariate</td></tr>
+        <tr><td class="mono-c">gap_pct</td><td>float</td><td>Open vs prior close. Gap-open sessions (beyond 1%) are reported on their own line</td></tr>
         <tr class="hi"><td class="mono-c">checklist_ok</td><td>0/1</td><td>Did every pre-registered condition hold? Zeros are excluded from the primary analysis: they measure discipline, not the setup</td></tr>
+        <tr><td class="mono-c">failed_checks</td><td>str</td><td>Optional. Which conditions did not hold, so exclusions can be counted by reason</td></tr>
         <tr><td class="mono-c">grade</td><td>A/B/C</td><td>Your execution quality, separate from the setup's quality</td></tr>
         <tr><td class="mono-c">notes</td><td>str</td><td>One line. Screenshot filename if you keep them</td></tr>
       </tbody>
@@ -357,15 +360,15 @@
           <li>IB range between 0.25% and 0.75% of index level — excludes both dead and blown-out openings</li>
           <li>Break occurs between 10:00 and 11:30 ET</li>
           <li>ES cumulative delta makes a new session extreme in the break direction within 3 bars of the break</li>
-          <li>Retest holds the IB edge for one full volume bar without closing back inside by more than 2 points</li>
+          <li>Retest holds the IB edge for one full volume bar without closing back inside by more than 2 points — judged on the bar's close; a wick deeper inside does not fail it (clarified — see §09)</li>
         </ul></dd>
-        <dt>Entry</dt><dd>Limit at the IB edge ± 1 tick, on the retest only. No chasing the initial break.</dd>
+        <dt>Entry</dt><dd>Limit at the IB edge ± 1 tick, on the retest only. No chasing the initial break. One S1 order per IB edge per session — price crossing back and forth over an edge does not make a new setup (amended — see §09).</dd>
         <dt>Stop</dt><dd>1 point beyond the retest swing. Floor 4 pts, cap 8 pts — if structure demands more than 8, stand down.</dd>
         <dt>Target</dt><dd>Mechanical series: 2R. Managed: half at 1R, runner to IB edge + 1.0 × IB range or a session VWAP break.</dd>
-        <dt>Stand down</dt><dd>FOMC / CPI / NFP days before 10:30 ET. Gap opens beyond 1% of prior close — log separately, different regime.</dd>
+        <dt>Stand down</dt><dd>FOMC / CPI / NFP / PPI / retail sales days before 10:30 ET (PPI and retail sales amended in — see §09) — FOMC meaning the statement day of a scheduled meeting, releases meaning the day they actually came out (clarified — see §09). Gap opens beyond 1% of prior close are a different regime — traded and flagged, and reported separately (amended — see §09).</dd>
       </dl>
     </div>
-    <div class="fail"><b>Known failure mode</b>The false break that reverses back through the entire IB. Log those as <code>IB_FAIL</code> with the same schema — the mirror trade may carry more edge than the setup itself, and you'll only find out if you record it.</div>
+    <div class="fail"><b>Known failure mode</b>The false break that reverses back through the entire IB. Log those as <code>IB_FAIL</code> with the same schema — the mirror trade may carry more edge than the setup itself, and you'll only find out if you record it. <em>IB_FAIL rules (added — see §09):</em> same IB range filter, 10:00–11:30 window and stand-downs as S1. Trigger: the first bar after a break that closes more than 2 points back inside the IB. Entry: stop order 1 tick beyond that bar's far end, in the reversal direction. Stop: 1 point beyond the false break's extreme; floor 4 pts, cap 8 pts — wider structure is no trade. Target: 2R. A break yields S1 or IB_FAIL, never both, and each IB edge gives at most one IB_FAIL order per session. IB_FAIL is <strong>exploratory</strong>: reported, never judged — no gate verdict, no confirmation claim, not in the portfolio, and not one of the five setups in the Bonferroni correction. A promising result needs its own pre-registered sample.</div>
   </article>
 
   <article class="setup">
@@ -395,12 +398,12 @@
       <dl class="spec">
         <dt>Day gate</dt><dd>All three, confirmed before any entry: open outside prior value; one-timeframing on 30-min bars for 2 consecutive bars; session cumulative delta at a session extreme with price.</dd>
         <dt>Trigger</dt><dd><ul>
-          <li>Pullback to session VWAP ± 2 points, or to the developing value-area edge</li>
+          <li>Pullback to session VWAP ± 2 points, or to within 2 points of the developing value-area edge — today's value-area high for a long, low for a short, from the profile so far. Since the open or the last entry, price must have been more than 2 points beyond where the level is now, on the trend side — price came back to the level, not the level to price — and one pullback gives one entry (clarified — see §09)</li>
           <li>Declining volume on the pullback versus the impulse leg</li>
           <li>Counter-delta on the pullback under 40% of the impulse delta — fading, not reversing</li>
         </ul></dd>
-        <dt>Entry</dt><dd>Choose one and pre-register it: limit at VWAP, <em>or</em> stop-entry 1 tick beyond the pullback bar's extreme. Mixing them mid-study destroys the sample.</dd>
-        <dt>Stop</dt><dd>Beyond the low-volume node under the pullback. Floor 5 pts, cap 10 pts.</dd>
+        <dt>Entry</dt><dd>Choose one and pre-register it: limit at VWAP (or at the value-area edge, when that is the level the pullback reached), <em>or</em> stop-entry 1 tick beyond the pullback bar's extreme. Mixing them mid-study destroys the sample.</dd>
+        <dt>Stop</dt><dd>Beyond the low-volume node under the pullback: 1 tick past the first price beyond the pullback (and the entry) where under 25% as much has traded today as at the busiest price. Floor 5 pts, cap 10 pts — no such price within 10 pts is no trade (defined — see §09).</dd>
         <dt>Target</dt><dd>Mechanical: 2R. Managed: trail on 30-min structure. A fixed 1R target here throws away the setup's entire reason for existing.</dd>
         <dt>Stand down</dt><dd>After 15:00 ET. Any day where VWAP has been crossed more than 3 times — that's a balance day in a trend costume.</dd>
       </dl>
@@ -507,6 +510,33 @@ python mes_replay_eval.py trades.csv --min-expectancy 0.15 --alpha 0.01
 <span class="c">#   breakdown by day type and by exit reason</span>
 <span class="c">#   portfolio view: daily P&amp;L distribution and max drawdown</span></pre>
   <p>Run it on a fixed cadence — every 20 sessions, say — not whenever a stretch feels good or bad. Checking the numbers after a losing week and again after a winning one is an informal sequential test with no correction, and it will find whatever you are hoping for.</p>
+</section>
+
+<section>
+  <h2><span class="num">09</span>Amendments</h2>
+  <p class="sub">Changes to the rules above, dated, made before the affected samples were collected. The original wording is in the repository history.</p>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Date</th><th>Change</th><th>Samples restarted</th></tr></thead>
+      <tbody>
+        <tr><td class="mono-c">2026-09-15</td><td>Burn-in trades (the first 30 of each setup) are included in the primary analysis and flagged, not excluded. The report also shows each setup without them. Gate checkpoints count burn-in trades, so n = 60 arrives 30 trades sooner.</td><td>All setups — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>S1 sessions that open more than 1% away from the prior close are no longer excluded. The trades are kept, the gap is logged in <code>gap_pct</code>, and the report shows gap-open sessions on their own line.</td><td>S1 — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>Trade log records the mechanical exit as a price and reason (<code>mech_exit_px</code>, <code>mech_exit_reason</code>) instead of a typed <code>mech_exit_R</code>, which is now computed. Adds <code>contract</code>, <code>gap_pct</code> and <code>failed_checks</code>. A logging change, not a rule change.</td><td>None</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>Clarifies the S1 news stand-down. An FOMC day is the statement day of a scheduled meeting; unscheduled meetings, notation votes and cancelled meetings do not count, since none could be planned around that morning. CPI and NFP days are the dates the release actually came out (FRED), including delayed releases. A session the news calendar does not cover cannot verify the stand-down and leaves the primary sample.</td><td>None — clarifies an undefined term</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>S1 also stands down before 10:30 ET on PPI and advance retail sales release days. Together with FOMC, CPI and NFP that is about 50 sessions a year (roughly one in five), up from about 32.</td><td>S1 — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>S1 retest: "closing back inside by more than 2 points" is judged on the bar's close. The generator had used the bar's low (high for shorts), which cancelled retests whose wick poked deeper but closed within 2 points. The wick still sets the swing the stop goes beyond.</td><td>S1 — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>IB_FAIL gets entry and stop rules (see the S1 failure-mode note). It triggers when a break closes more than 2 points back inside, rather than after price crosses the whole IB, so the entry does not chase. S1 and IB_FAIL take different outcomes of the same break and never both trade it.</td><td>IB_FAIL — new sample</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>S3 pullbacks to the developing value-area edge are built: within 2 points of today's value-area high (long) or low (short), from the session profile through the signal bar. A limit entry rests at the level reached, VWAP when both. A pullback must come from price more than 2 points away from the level on the trend side, and gives one entry; the generator had signalled at the session high on steady climbs and re-signalled while price sat on VWAP. This pullback rule was proposed during implementation and confirmed by the study owner the same day.</td><td>S3 — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>S3 stop defined: 1 tick beyond the low-volume node — the first price past the pullback extreme (or the entry, if further) with under 25% of the busiest price's volume in today's profile through the signal bar. Floor 5, cap 10; no node within the cap is no trade. The generator had placed the stop 1 tick beyond the pullback extreme. Also sharpens the pullback rule above: "away" is measured against where the level is now, since the open or the last entry, so a value area rising into a flat afternoon is not a pullback.</td><td>S3 — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>SPY prototyping runs scale every ES-point threshold by the prior trading day's SPY close over the S&amp;P 500 index close (FRED, standing in for ES; under 1% apart). A day without that ratio generates nothing. Futures runs are unchanged.</td><td>SPY prototype runs only</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>IB_FAIL is exploratory. It is reported with its trades, mean and interval, but gets no futility-gate verdict and no confirmation sample size, and is left out of the portfolio. The Bonferroni correction stays over the five setups (alpha 0.01). A promising IB_FAIL result would need its own pre-registered sample before it could count.</td><td>None — analysis plan only</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>One S1 order and one IB_FAIL order per IB edge per session; the first order placed uses the edge, filled or not. Found on the pipeline's first real-data run (ES, August 2026): price crossing back and forth over an IB edge counted as a new break each time, and one edge was sold six times in an hour with several positions open at once.</td><td>S1, IB_FAIL — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>No setup holds two positions at once. A signal that arrives while the same setup still has an order working or a position open is not taken — the trade you are already in is the trade. Setups are independent of each other. Same run: 11 of 29 trades overlapped another trade in their own setup, so correlated attempts at one idea were counted as separate evidence.</td><td>All generated setups — none collected yet</td></tr>
+        <tr><td class="mono-c">2026-09-15</td><td>ES (ESU6) 2026-07-30 to 2026-08-31 is declared <strong>validation-only</strong>. It was the first real-data run, read trade by trade, and the two rules above came out of reading it — so its trades can never join a study sample. <code>VALIDATION_PERIODS</code> in <code>config.py</code> holds the range and the evaluator drops those trades before anything else, naming them in the report.</td><td>None — these sessions are outside every sample</td></tr>
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <footer>

@@ -31,10 +31,12 @@ still not compare levels across a roll boundary.
 
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass, field
+from pathlib import Path
 from datetime import date, time, timedelta
-from typing import Iterable, Literal, Optional, Sequence
+from typing import Iterable, Literal, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -42,9 +44,11 @@ import pandas as pd
 from zoneinfo import ZoneInfo
 
 from .config import (
-    DAY_TYPE_CUTOFF, ET, IB_END, ON_OPEN, RTH_CLOSE, RTH_OPEN,
-    S1_IB_RANGE_MAX_PCT, S1_IB_RANGE_MIN_PCT, S3_MAX_VWAP_CROSSES,
-    S3_MIN_OTF_BARS,
+    AGGRESSOR_MIN_AGREEMENT, AGGRESSOR_MIN_CLASSIFIED, DAY_TYPE_CUTOFF,
+    DOUBLE_DIST_RANGE_MULT, ET, IB_END, ON_OPEN,
+    OTF_BAR_MINUTES, RTH_CLOSE, RTH_OPEN, S1_IB_RANGE_MAX_PCT,
+    S1_IB_RANGE_MIN_PCT, S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS,
+    S5_ON_EXTREME_PCT, VALUE_AREA_PCT,
 )
 
 SourceKind = Literal["SPY", "FUTURES"]
@@ -93,17 +97,143 @@ def load_csv_bars(
     default assumes exchange-local, which is what most free feeds ship.
     """
     df = pd.read_csv(path)
-    df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-    df = df.set_index(timestamp_col)
-    if df.index.tz is None:
-        df = df.tz_localize(ZoneInfo(tz), nonexistent="shift_forward",
-                            ambiguous="infer")
+    raw = df[timestamp_col].astype(str)
+    if pd.to_datetime(raw.iloc[:1]).dt.tz is not None:
+        # offsets in the strings are authoritative, and they change at DST —
+        # parse through UTC or pandas falls back to an object index
+        idx = pd.DatetimeIndex(pd.to_datetime(raw, utc=True))
+    else:
+        idx = pd.DatetimeIndex(pd.to_datetime(raw)).tz_localize(
+            ZoneInfo(tz), nonexistent="shift_forward", ambiguous="infer")
+    df = df.drop(columns=[timestamp_col]).set_index(idx)
     return _finalize(df, source)
+
+
+def load_reference_closes(path: str) -> dict[date, float]:
+    """Daily reference closes (S&P 500 index, standing in for ES) for SPY point
+    scaling: `date,close` rows; '#' comments and the header are skipped, and a
+    malformed row raises rather than leaving a silent hole."""
+    out: dict[date, float] = {}
+    with open(path, encoding="utf-8") as fh:
+        for n, raw in enumerate(fh, start=1):
+            line = raw.split("#", 1)[0].strip()
+            if not line or line.replace(" ", "") == "date,close":
+                continue
+            day, _, close = line.partition(",")
+            try:
+                out[date.fromisoformat(day.strip())] = float(close)
+            except ValueError:
+                raise ValueError(f"{path}:{n}: expected YYYY-MM-DD,close, got {line!r}") from None
+    return out
 
 
 def load_dataframe_bars(df: pd.DataFrame, source: SourceKind = "SPY") -> pd.DataFrame:
     """Wrap an already-loaded bar frame (e.g. from an Alpaca or Polygon client)."""
     return _finalize(df.copy(), source)
+
+
+_CONTINUOUS_SYMBOL = re.compile(r"^[A-Z0-9]+\.[cnv]\.\d+$")
+_PARENT_SYMBOL = re.compile(r"^[A-Z0-9]+\.(FUT|OPT)$")
+
+
+def databento_symbology(symbols: str | Sequence[str]) -> tuple[str, str]:
+    """Validate a Databento request against invariant 6: one contract month.
+
+    Returns (symbol, stype_in). Refuses anything that would interleave
+    several instruments into one tape — multiple symbols, parent symbology
+    (every expiry *and* every spread at once), calendar spreads (prices are
+    spread values, not index levels). Continuous symbols (ES.c.0) are
+    unadjusted, so levels are fine *within* one expiry but every level
+    compared across the roll is wrong; that is allowed, loudly.
+    """
+    items = [symbols] if isinstance(symbols, str) else list(symbols)
+    items = [p.strip() for s in items for p in str(s).split(",") if p.strip()]
+    if len(items) != 1:
+        raise ValueError(
+            f"one contract month per request, got {items}. Bars are resampled "
+            "from every trade in the response, so several instruments would be "
+            "interleaved into one corrupt tape.")
+    sym = items[0]
+    if _PARENT_SYMBOL.match(sym):
+        raise ValueError(
+            f"{sym} is parent symbology: every expiry and spread in one stream. "
+            "Request a single expiry such as ESZ5.")
+    if "-" in sym or ":" in sym:
+        raise ValueError(f"{sym} looks like a spread; its prices are not index levels.")
+    if _CONTINUOUS_SYMBOL.match(sym):
+        warnings.warn(
+            f"!!! {sym} is a CONTINUOUS symbol. The series switches contract at "
+            "each roll; any value area, overnight range or IB compared across "
+            "that boundary is corrupt. Prefer a single expiry, and never pool "
+            "levels across a roll. !!!",
+            stacklevel=2,
+        )
+        return sym, "continuous"
+    return sym, "raw_symbol"
+
+
+def tbbo_to_bars(
+    trades: pd.DataFrame, bar_minutes: int = 1, sell_aggressor_code: str = "A",
+) -> pd.DataFrame:
+    """Aggregate a Databento TBBO/trades frame (as from `DBNStore.to_df()`)
+    into signed OHLCV bars.
+
+    Separate from the download so a file you already paid for can be
+    converted without re-requesting it, and so the conventions below are
+    testable offline:
+
+    * Bars are timed by `ts_event` (matching engine) when present. `to_df()`
+      indexes by `ts_recv`, which lags and can push a trade into the next bar.
+    * Only trades whose side is the buy or sell aggressor code count toward
+      delta. Side 'N' (no aggressor: auctions, some opening prints) is
+      counted in volume but in neither buy nor sell — treating it as a buy
+      biases every cumulative-delta condition upward.
+    * More than one instrument_id means the tape spans a roll (continuous
+      symbology) and is warned about.
+    """
+    if sell_aggressor_code not in ("A", "B"):
+        raise ValueError(f"sell_aggressor_code must be 'A' or 'B', got {sell_aggressor_code!r}")
+    buy_code = "B" if sell_aggressor_code == "A" else "A"
+    if trades.empty:
+        raise ValueError("no trades to aggregate")
+
+    ts_src = trades["ts_event"] if "ts_event" in trades.columns else trades.index
+    ts = pd.DatetimeIndex(pd.to_datetime(ts_src, utc=True))
+
+    if "instrument_id" in trades.columns and trades["instrument_id"].nunique() > 1:
+        firsts = pd.Series(ts, index=trades["instrument_id"].to_numpy()) \
+            .groupby(level=0).min().sort_values()
+        warnings.warn(
+            f"!!! tape contains {len(firsts)} instruments — a roll inside the "
+            f"requested range (first prints: {', '.join(map(str, firsts))}). "
+            "Levels computed across the roll are corrupt. !!!",
+            stacklevel=2,
+        )
+
+    px = trades["price"].astype(float)
+    if px.median() > 1e6:  # fixed-point 1e-9 (to_df(price_type="fixed"))
+        px = px / 1e9
+
+    size = trades["size"].astype(float).to_numpy()
+    side = trades["side"].astype(str).to_numpy()
+    t = pd.DataFrame({
+        "price": px.to_numpy(),
+        "size": size,
+        "buy_volume": np.where(side == buy_code, size, 0.0),
+        "sell_volume": np.where(side == sell_aggressor_code, size, 0.0),
+    }, index=ts).tz_convert(ET).sort_index()
+
+    rule = f"{bar_minutes}min"
+    bars = t["price"].resample(rule).ohlc()
+    bars["volume"] = t["size"].resample(rule).sum()
+    bars["buy_volume"] = t["buy_volume"].resample(rule).sum()
+    bars["sell_volume"] = t["sell_volume"].resample(rule).sum()
+    bars = bars.dropna(subset=["open"])
+    total = float(t["size"].sum())
+    unsided = float(t["size"].sum() - t["buy_volume"].sum() - t["sell_volume"].sum())
+    out = _finalize(bars, "FUTURES")
+    out.attrs["unsided_volume_frac"] = unsided / total if total > 0 else 0.0
+    return out
 
 
 def load_databento_tbbo(
@@ -114,6 +244,7 @@ def load_databento_tbbo(
     bar_minutes: int = 1,
     api_key: Optional[str] = None,
     sell_aggressor_code: str = "A",
+    path: Optional[str] = None,
 ) -> pd.DataFrame:
     """Pull TBBO from Databento and aggregate to signed OHLCV bars.
 
@@ -129,42 +260,91 @@ def load_databento_tbbo(
     order — 'A' (ask) for a sell aggressor, 'B' (bid) for a buy aggressor.
     Verify against a session you know before trusting the sign of delta; an
     inverted convention flips every conclusion in the protocol.
+
+    The symbol is checked by `databento_symbology` *before* any request is
+    made, so a request that would corrupt the tape never costs money.
+
+    `path`: where the raw DBN download is kept. If the file already exists it
+    is read instead of requested — a download is paid for once. A saved file
+    for a different symbol is refused rather than silently reused.
+
+    The returned bars carry attrs["aggressor_check"] from
+    `aggressor_convention`, so the caller can confirm the side codes against
+    the quotes before trusting any delta condition.
     """
+    symbol, stype_in = databento_symbology(symbols)
     try:
         import databento as db
     except ImportError:
         raise ImportError("pip install databento")
 
-    client = db.Historical(api_key) if api_key else db.Historical()
-    data = client.timeseries.get_range(
-        dataset=dataset, schema="tbbo", symbols=symbols,
-        start=start, end=end,
-    )
+    if path is not None and Path(path).is_file():
+        data = db.DBNStore.from_file(path)
+        if symbol not in (data.symbols or []):
+            raise ValueError(f"{path} holds {data.symbols}, not {symbol} — pass another path")
+    else:
+        client = db.Historical(api_key) if api_key else db.Historical()
+        data = client.timeseries.get_range(
+            dataset=dataset, schema="tbbo", symbols=symbol, stype_in=stype_in,
+            start=start, end=end, path=path,
+        )
     trades = data.to_df()
     if trades.empty:
         raise ValueError("Databento returned no trades for that range/symbol")
+    bars = tbbo_to_bars(trades, bar_minutes=bar_minutes,
+                        sell_aggressor_code=sell_aggressor_code)
+    bars.attrs["aggressor_check"] = aggressor_convention(trades)
+    return bars
 
-    px = trades["price"].astype(float)
-    if px.median() > 1e6:  # fixed-point 1e-9, not converted by this client version
-        px = px / 1e9
-    ts = pd.to_datetime(trades.index if trades.index.name else trades["ts_event"],
-                        utc=True)
 
-    t = pd.DataFrame({"price": px.values, "size": trades["size"].astype(float).values,
-                      "side": trades["side"].astype(str).values}, index=ts)
-    t = t.tz_convert(ET)
+def aggressor_convention(trades: pd.DataFrame) -> dict:
+    """Which side code means a sell aggressor, read from the quotes in the tape.
 
-    is_sell = t["side"] == sell_aggressor_code
-    t["buy_volume"] = np.where(is_sell, 0.0, t["size"])
-    t["sell_volume"] = np.where(is_sell, t["size"], 0.0)
+    TBBO records carry the best bid and offer just before each trade. A trade
+    at or through the ask was a buyer lifting it; at or through the bid, a
+    seller hitting it. Trades inside the spread, on a locked or crossed book,
+    or with side 'N' are not classified. Returns the inferred sell-aggressor
+    code ('A' or 'B', None if nothing was classifiable), the share of
+    classified trades consistent with it, and how many were classified.
+    """
+    def fixed_to_float(s: pd.Series) -> pd.Series:
+        s = s.astype(float)
+        return s / 1e9 if s.median() > 1e6 else s
 
-    rule = f"{bar_minutes}min"
-    bars = t["price"].resample(rule).ohlc()
-    bars["volume"] = t["size"].resample(rule).sum()
-    bars["buy_volume"] = t["buy_volume"].resample(rule).sum()
-    bars["sell_volume"] = t["sell_volume"].resample(rule).sum()
-    bars = bars.dropna(subset=["open"])
-    return _finalize(bars, "FUTURES")
+    px = fixed_to_float(trades["price"])
+    bid, ask = fixed_to_float(trades["bid_px_00"]), fixed_to_float(trades["ask_px_00"])
+    side = trades["side"].astype(str)
+    sided = side.isin(["A", "B"]) & (bid < ask)
+    at_ask, at_bid = sided & (px >= ask), sided & (px <= bid)
+    classified = int(at_ask.sum() + at_bid.sum())
+    if classified == 0:
+        return {"sell_aggressor_code": None, "agreement": None, "classified": 0}
+    sell = side[at_bid].value_counts()
+    sell_code = sell.idxmax() if len(sell) else ("A" if (side[at_ask] == "B").mean() >= 0.5 else "B")
+    buy_code = "B" if sell_code == "A" else "A"
+    agree = int((side[at_ask] == buy_code).sum() + (side[at_bid] == sell_code).sum())
+    return {"sell_aggressor_code": sell_code, "agreement": agree / classified,
+            "classified": classified}
+
+
+def aggressor_problem(check: Optional[dict], sell_aggressor_code: str) -> Optional[str]:
+    """Why the delta sign cannot be trusted, or None if the check passed.
+
+    An inverted side convention flips every delta condition in the protocol,
+    so anything short of a clear, well-populated agreement is a stop.
+    """
+    if not check or check.get("sell_aggressor_code") is None:
+        return "the tape has no trades at the bid or ask to check the side codes against"
+    if check["classified"] < AGGRESSOR_MIN_CLASSIFIED:
+        return (f"only {check['classified']} trades at the bid or ask — too few to "
+                f"confirm the side codes (need {AGGRESSOR_MIN_CLASSIFIED})")
+    if check["sell_aggressor_code"] != sell_aggressor_code:
+        return (f"the quotes say sell aggressors are marked {check['sell_aggressor_code']!r}, "
+                f"but bars were built with {sell_aggressor_code!r}: every delta would be inverted")
+    if check["agreement"] < AGGRESSOR_MIN_AGREEMENT:
+        return (f"side codes match the quotes on only {check['agreement']:.1%} of trades "
+                f"(need {AGGRESSOR_MIN_AGREEMENT:.0%})")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +364,8 @@ class Profile:
         return self.vah - self.val
 
 
-def volume_profile(bars: pd.DataFrame, tick: float, value_area: float = 0.70) -> Optional[Profile]:
+def volume_profile(bars: pd.DataFrame, tick: float,
+                   value_area: float = VALUE_AREA_PCT) -> Optional[Profile]:
     """Volume profile from OHLCV bars, distributing each bar's volume evenly
     across the price levels it spanned.
 
@@ -222,7 +403,8 @@ def volume_profile(bars: pd.DataFrame, tick: float, value_area: float = 0.70) ->
 
 
 def volume_profile_from_trades(
-    price: np.ndarray, size: np.ndarray, tick: float, value_area: float = 0.70
+    price: np.ndarray, size: np.ndarray, tick: float,
+    value_area: float = VALUE_AREA_PCT,
 ) -> Optional[Profile]:
     """Exact volume profile from trades at price (use with TBBO)."""
     if len(price) == 0:
@@ -324,6 +506,7 @@ class SessionLevels:
     prior_vah: Optional[float]
     prior_val: Optional[float]
     prior_vpoc: Optional[float]
+    prior_close: Optional[float]   # prior RTH session's last close
     opened_inside_value: Optional[bool]
 
     # overnight (futures only)
@@ -342,6 +525,20 @@ class SessionLevels:
     # order flow (TBBO only)
     cum_delta: Optional[pd.Series]
     delta_at_extreme: Optional[bool]
+
+    # Multiplier taking the setups' ES-point thresholds into this tape's
+    # points: 1.0 for futures; for SPY, the prior day's SPY close over the
+    # prior day's reference close. None when that ratio is unknown — the
+    # generators then produce nothing rather than use thresholds in the
+    # wrong units.
+    point_scale: Optional[float]
+
+    @property
+    def gap_pct(self) -> Optional[float]:
+        """Signed open-vs-prior-close gap as a fraction. None without a prior session."""
+        if self.prior_close is None or self.prior_close <= 0:
+            return None
+        return (self.open_px - self.prior_close) / self.prior_close
 
     def s1_gate(self, index_level: Optional[float] = None) -> bool:
         """S1: IB range between 0.25% and 0.75% of index level."""
@@ -364,10 +561,11 @@ class SessionLevels:
                 and self.vwap_crosses <= S3_MAX_VWAP_CROSSES)
 
     def s5_gate(self, on_volume_median: Optional[float] = None) -> bool:
-        """S5: 09:30 in the top/bottom 15% of a well-traded overnight range."""
+        """S5: 09:30 in the top/bottom S5_ON_EXTREME_PCT of a well-traded overnight range."""
         if self.on_range_pos is None:
             return False
-        extreme = self.on_range_pos >= 0.85 or self.on_range_pos <= 0.15
+        extreme = (self.on_range_pos >= 1.0 - S5_ON_EXTREME_PCT
+                   or self.on_range_pos <= S5_ON_EXTREME_PCT)
         if on_volume_median is None or self.on_volume is None:
             return extreme
         return extreme and self.on_volume > on_volume_median
@@ -380,12 +578,26 @@ def _session_vwap(bars: pd.DataFrame) -> pd.Series:
     return (cum_pv / cum_v.replace(0, np.nan)).ffill()
 
 
+def running_crosses(close: pd.Series, vwap: pd.Series) -> np.ndarray:
+    """Closes through VWAP, counted through each bar.
+
+    A close exactly on VWAP (or before VWAP exists) takes no side, so it
+    neither counts as a cross nor resets the last side. One definition serves
+    both the 11:00 day-type count and S3's bar-by-bar stand-down, so the two
+    can never disagree about what a cross is.
+    """
+    side = np.sign((close - vwap).to_numpy(dtype=float))
+    held = pd.Series(np.where(side == 0, np.nan, side)).ffill().to_numpy()
+    flips = np.zeros(len(held), dtype=np.int64)
+    if len(held) > 1:
+        prev, cur = held[:-1], held[1:]
+        flips[1:] = (cur != prev) & ~np.isnan(cur) & ~np.isnan(prev)
+    return np.cumsum(flips)
+
+
 def _count_crosses(close: pd.Series, vwap: pd.Series) -> int:
-    side = np.sign(close - vwap)
-    side = side[side != 0]
-    if len(side) < 2:
-        return 0
-    return int((side.to_numpy()[1:] != side.to_numpy()[:-1]).sum())
+    counts = running_crosses(close, vwap)
+    return int(counts[-1]) if len(counts) else 0
 
 
 def _one_timeframing(bars30: pd.DataFrame) -> tuple[int, int]:
@@ -428,7 +640,7 @@ def _classify(
     rng = pre["high"].max() - pre["low"].min()
     ib_rng = pre.between_time(RTH_OPEN, IB_END, inclusive="left")
     ib = (ib_rng["high"].max() - ib_rng["low"].min()) if not ib_rng.empty else np.nan
-    if (not np.isnan(ib) and ib > 0 and rng > 2.0 * ib
+    if (not np.isnan(ib) and ib > 0 and rng > DOUBLE_DIST_RANGE_MULT * ib
             and vwap_crosses > S3_MAX_VWAP_CROSSES):
         return "DOUBLE_DIST"
     return "BALANCE"
@@ -438,20 +650,26 @@ def build_sessions(
     bars: pd.DataFrame,
     tick: float,
     cutoff: time = DAY_TYPE_CUTOFF,
-    value_area: float = 0.70,
+    value_area: float = VALUE_AREA_PCT,
     dates: Optional[Iterable[date]] = None,
+    reference_closes: Optional[Mapping[date, float]] = None,
 ) -> list[SessionLevels]:
     """Build a SessionLevels record per RTH session.
 
     Every field that feeds day classification is computed from bars at or
     before `cutoff`. The full-session high/low/close are recorded for outcome
     evaluation but never touch the classification path.
+
+    `reference_closes` (SPY only) are daily S&P 500 closes keyed by date. A
+    session's point_scale uses the PRIOR session's SPY close and the reference
+    close on that same date: today's close is not known at 10:00.
     """
     source: SourceKind = bars.attrs.get("source", "SPY")
     all_dates = _session_dates(bars)
     wanted = sorted(set(dates)) if dates is not None else all_dates
 
     prior_profiles: dict[date, Optional[Profile]] = {}
+    prior_closes: dict[date, float] = {}
     out: list[SessionLevels] = []
 
     for i, d in enumerate(all_dates):
@@ -459,11 +677,18 @@ def build_sessions(
         if rth.empty:
             continue
         prior_profiles[d] = volume_profile(rth, tick=tick, value_area=value_area)
+        prior_closes[d] = float(rth["close"].iloc[-1])
         if d not in wanted:
             continue
 
         prior_d = all_dates[i - 1] if i > 0 else None
         pp = prior_profiles.get(prior_d) if prior_d else None
+        prior_close = prior_closes.get(prior_d) if prior_d else None
+        if source == "FUTURES":
+            point_scale: Optional[float] = 1.0
+        else:
+            ref = (reference_closes or {}).get(prior_d) if prior_d else None
+            point_scale = prior_close / ref if prior_close and ref else None
 
         ib = rth.between_time(RTH_OPEN, IB_END, inclusive="left")
         if ib.empty:
@@ -477,7 +702,7 @@ def build_sessions(
 
         agg = {"open": "first", "high": "max", "low": "min",
                "close": "last", "volume": "sum"}
-        pre30 = pre.resample("30min").agg(agg).dropna(subset=["open"])
+        pre30 = pre.resample(f"{OTF_BAR_MINUTES}min").agg(agg).dropna(subset=["open"])
         otf_up, otf_down = _one_timeframing(pre30)
 
         opened_inside = None
@@ -491,8 +716,9 @@ def build_sessions(
             on_high, on_low = float(on["high"].max()), float(on["low"].min())
             on_mid = (on_high + on_low) / 2.0
             span = on_high - on_low
-            on_pos = float((open_px - on_low) / span) if span > 0 else 0.5
-            on_pos = min(max(on_pos, 0.0), 1.0)
+            # a range with no width has no position in it — None, not 0.5
+            on_pos = min(max(float((open_px - on_low) / span), 0.0), 1.0) \
+                if span > 0 else None
             on_vol = float(on["volume"].sum())
 
         if bars.attrs.get("has_delta", False):
@@ -514,6 +740,7 @@ def build_sessions(
             prior_vah=pp.vah if pp else None,
             prior_val=pp.val if pp else None,
             prior_vpoc=pp.poc if pp else None,
+            prior_close=prior_close,
             opened_inside_value=opened_inside,
             on_high=on_high, on_low=on_low, on_mid=on_mid,
             on_range_pos=on_pos, on_volume=on_vol,
@@ -521,6 +748,7 @@ def build_sessions(
             day_type=_classify(otf_up, otf_down, opened_inside, pre, crosses),
             classified_at=cutoff,
             cum_delta=cd, delta_at_extreme=at_extreme,
+            point_scale=point_scale,
         ))
 
     if source == "SPY":
@@ -543,7 +771,8 @@ def sessions_to_frame(sessions: Sequence[SessionLevels]) -> pd.DataFrame:
             "rth_high": s.rth_high, "rth_low": s.rth_low, "rth_close": s.rth_close,
             "vwap_crosses": s.vwap_crosses,
             "prior_vah": s.prior_vah, "prior_val": s.prior_val,
-            "prior_vpoc": s.prior_vpoc, "opened_inside_value": s.opened_inside_value,
+            "prior_vpoc": s.prior_vpoc, "prior_close": s.prior_close,
+            "gap_pct": s.gap_pct, "opened_inside_value": s.opened_inside_value,
             "on_high": s.on_high, "on_low": s.on_low, "on_mid": s.on_mid,
             "on_range_pos": s.on_range_pos, "on_volume": s.on_volume,
             "otf_up_bars": s.otf_up_bars, "otf_down_bars": s.otf_down_bars,

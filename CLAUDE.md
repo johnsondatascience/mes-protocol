@@ -11,7 +11,8 @@ sample-size math — is in `docs/protocol.html`. This code exists to:
 
 1. compute session levels (value area, IB, VWAP, overnight range, day type)
    without look-ahead,
-2. generate signals for the two setups that can be checked from bars (S1, S3),
+2. generate signals for the setups that can be checked from bars (S1, its
+   IB_FAIL mirror, and S3),
 3. score them under deliberately pessimistic fill assumptions,
 4. evaluate the resulting trade log with a session-block bootstrap.
 
@@ -33,14 +34,26 @@ src/mesproto/
   config.py     all constants: contract specs, cost model, session times,
                 setup thresholds, statistical parameters. No magic numbers
                 anywhere else — if you find one, move it here.
-  levels.py     loaders (CSV / Databento TBBO) -> bars; volume profile and
-                value area; SessionLevels per RTH day; day-type classification.
-  signals.py    S1 and S3 generators; pessimistic fill simulation.
+  levels.py     loaders (CSV / Databento TBBO / reference closes) -> bars;
+                volume profile and value area; SessionLevels per RTH day
+                (incl. point_scale for SPY); day-type classification.
+  sources.py    network access to FRED and federalreserve.gov (scripts only).
+  news.py       scheduled-release calendar (FRED + federalreserve.gov): parsers,
+                the coverage-aware NewsCalendar, and the FOMC fetcher.
+  optimus.py    reads an Optimus Flow (Quantower) CSV export and compares its
+                delta with ours — the platform has no API, only files.
+  signals.py    S1, IB_FAIL and S3 generators; pessimistic fill simulation.
+                S1 and IB_FAIL share one walk of the tape, so a break yields
+                at most one of them.
   schema.py     the canonical trade-log shape, shared by hand-logged replay
                 and generated signals; validation.
   evaluate.py   R computation, session-block bootstrap, futility gates. CLI.
 tests/          run directly (python tests/test_x.py) or with pytest.
 scripts/        run_pipeline.py — bars to evaluation in one command.
+                fetch_news_calendar.py — builds data/news_calendar.csv (network).
+                fetch_reference_closes.py — builds data/sp500_close.csv for
+                SPY point scaling (network).
+                compare_optimus_export.py — Optimus Flow CSV vs our saved bars.
 docs/           protocol.html — the study design these tools serve.
 ```
 
@@ -54,15 +67,22 @@ Data flow: `bars -> build_sessions -> run_all -> fills_to_log -> compute_r -> re
    one-timeframing — not the moment the run began in hindsight.
    `tests/test_levels.py::test_no_lookahead` mutates the tape after the cutoff
    and asserts nothing upstream changes. **If you touch classification, that
-   test must still pass.**
+   test must still pass.** Generators are held to the same standard by
+   `assert_signals_survive_truncation` in `test_signals.py`: every signal must
+   be reproducible, unchanged, from the tape cut at its own bar.
 2. **Missing data is `None`, never a plausible substitute.** SPY has no
    overnight session, so `on_high`/`on_range_pos` are `None` and `s5_gate()` is
    `False`. Do not "fix" this by using the 09:30 open, the prior close, or
-   extended-hours equity bars.
+   extended-hours equity bars. The same holds for the news calendar: a
+   session outside its declared coverage, or an event type it does not carry,
+   is `None` — never a quiet day. And for SPY point scaling: a session with
+   no prior-day reference close has `point_scale=None` and generates nothing;
+   never substitute a fixed 1/10 or today's close.
 3. **Fill conventions stay pessimistic.** Limit entries require trading
    *strictly through* the level. Stop entries pay a tick. When one bar contains
    both stop and target, the **stop** is assumed first and `ambiguous_bar` is
-   flagged. Every one of these is pinned by a test in `test_signals.py`. A
+   flagged. The fill bar is checked for the stop and never for the target.
+   Every one of these is pinned by a test in `test_signals.py`. A
    request to make fills "more realistic" is almost always a request to make
    them more favorable — push back and ask for the specific evidence.
 4. **`checklist_ok` is False when a condition could not be verified.** A signal
@@ -77,6 +97,20 @@ Data flow: `bars -> build_sessions -> run_all -> fills_to_log -> compute_r -> re
 7. **The bootstrap resamples sessions, not trades.** Trades within a session
    share a regime and share the trader's state. Switching to an i.i.d. bootstrap
    tightens every interval by roughly a third and is wrong.
+8. **One position per setup, one order per IB edge.** `run_session` resolves
+   signals in time order through `_simulate_one_position_per_setup` and skips
+   any whose setup still has an order working or a position open; each IB edge
+   gives S1 and IB_FAIL one order per session. Both came from the first real
+   tape (August 2026 ES), where one edge was sold six times in an hour. Logging
+   several attempts at one idea as independent trades inflates the sample and
+   the confidence in it.
+9. **Gates are decided at fixed checkpoints, on the trades that existed then.**
+   `futility_verdict` evaluates n = 60 on the first 60 primary trades and
+   n = 150 on the first 150; a kill stays a kill. Burn-in (the first 30 trades
+   of each setup, by time) counts toward those checkpoints: since the
+   2026-09-15 amendment it is flagged `burn_in=True`, not removed. Re-deciding
+   on the whole sample every time the report runs is an uncorrected
+   sequential test.
 
 ## Changing parameters
 
@@ -99,19 +133,23 @@ A setup generator is complete when all of the following hold:
 - [ ] Every trigger condition from `docs/protocol.html` maps to a named key in
       `Signal.checklist`, and any condition the data cannot verify is `None`.
 - [ ] It emits nothing before its conditions are knowable in real time, with a
-      test proving it (mirror `test_s3_never_enters_before_confirmation`).
+      test proving it (mirror `test_s3_never_enters_before_confirmation`, and
+      run it through `assert_signals_survive_truncation`).
 - [ ] Stops respect the setup's floor and cap; structure beyond the cap means
       **no trade**, never a widened stop.
 - [ ] The generator returns `[]` when its day gate fails, with a test.
 - [ ] Output flows through `fills_to_log` and passes `schema.validate`.
 - [ ] Its stand-down windows (news releases, time-of-day) are enforced from
       `config.py`, not hardcoded.
+- [ ] Every threshold in points is multiplied by `lv.point_scale`, and the
+      generator returns `[]` when that is `None`.
 
 ## Testing
 
 ```bash
 PYTHONPATH=src python3 tests/test_levels.py
 PYTHONPATH=src python3 tests/test_signals.py
+PYTHONPATH=src python3 tests/test_evaluate.py
 # or
 pip install -e ".[dev]" && pytest
 ```
@@ -127,7 +165,7 @@ files. Keep it that way; a test suite that needs market data stops being run.
 | "Assume target hits first on ambiguous bars" | Manufactures edge | Report the ambiguous share; if it is large, the answer is replay |
 | "Backtest S4 from bars" | Absorption is not visible in OHLCV | Databento MBP-10, or keep it in manual replay |
 | "Use a continuous contract for more history" | Corrupts every level | Per-expiry data with explicit roll handling |
-| "Drop the losing trades before the cutoff, they were learning" | Post-hoc exclusion | The pre-registered 30-trade burn-in, applied uniformly |
+| "Drop the losing trades before the cutoff, they were learning" | Post-hoc exclusion | The 30-trade burn-in flag, applied uniformly, and the report's "without burn-in" comparison line |
 | "Add live order routing" | Out of scope, and unreviewed | Nothing — this repo does not trade |
 
 ## Style

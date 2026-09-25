@@ -24,6 +24,11 @@ FILL CONVENTIONS (deliberately pessimistic — do not "fix" these)
 * If a single bar's range covers both stop and target, the STOP is assumed to
   have been hit first. Bar data cannot resolve the sequence, and assuming the
   favorable ordering is how backtests manufacture edges that evaporate live.
+* The fill bar is checked for the stop, never for the target. A stop entry
+  whose fill bar spans the stop is scored a loss and flagged ambiguous; a
+  limit fill bar that spans the stop is a certain loss.
+* An entry still resting at the signal's entry_deadline (a setup's stand-down
+  time) is cancelled, never filled.
 * Any position still open at RTH close exits at the closing price (TIME).
 """
 
@@ -37,13 +42,18 @@ import numpy as np
 import pandas as pd
 
 from .config import (
-    ET, MECHANICAL_TARGET_R, RTH_CLOSE, RTH_OPEN, S1_BREAK_WINDOW,
-    S1_DELTA_CONFIRM_BARS, S1_RETEST_MAX_REENTRY_PTS, S1_STOP_CAP_PTS,
-    S1_STOP_FLOOR_PTS, S3_ENTRY_CUTOFF, S3_MAX_COUNTER_DELTA_FRAC,
-    S3_MIN_OTF_BARS, S3_STOP_CAP_PTS, S3_STOP_FLOOR_PTS,
-    S3_VWAP_TOLERANCE_PTS, Contract,
+    ENTRY_MAX_WAIT_BARS, ET, IB_FAIL_STOP_BEYOND_EXTREME_PTS, IB_FAIL_STOP_CAP_PTS,
+    IB_FAIL_STOP_FLOOR_PTS, MECHANICAL_TARGET_R, OTF_BAR_MINUTES, RTH_CLOSE,
+    RTH_OPEN, S1_BREAK_WINDOW, S1_DELTA_CONFIRM_BARS,
+    S1_NEWS_EVENTS, S1_NEWS_STAND_DOWN_UNTIL, S1_RETEST_MAX_REENTRY_PTS,
+    S1_STOP_BEYOND_SWING_PTS,
+    S1_STOP_CAP_PTS, S1_STOP_FLOOR_PTS, S3_ENTRY_CUTOFF, S3_MAX_COUNTER_DELTA_FRAC,
+    S3_LVN_MAX_FRAC_OF_POC, S3_MAX_VWAP_CROSSES, S3_MIN_OTF_BARS, S3_STOP_CAP_PTS,
+    S3_STOP_FLOOR_PTS,
+    S3_VA_EDGE_TOLERANCE_PTS, S3_VWAP_TOLERANCE_PTS, Contract,
 )
-from .levels import SessionLevels, rth_slice
+from .levels import Profile, SessionLevels, rth_slice, running_crosses, volume_profile
+from .news import NewsCalendar
 
 Direction = Literal["LONG", "SHORT"]
 EntryStyle = Literal["LIMIT", "STOP"]
@@ -61,6 +71,9 @@ class Signal:
     entry_style: EntryStyle
     checklist: dict = field(default_factory=dict)
     context: dict = field(default_factory=dict)
+    # a resting entry is cancelled at this ET time: a stand-down that only
+    # gated signals would still let an order placed at 14:59 fill at 15:28
+    entry_deadline: Optional[time] = None
 
     @property
     def risk_pts(self) -> float:
@@ -97,7 +110,12 @@ class Fill:
     exit_px: Optional[float] = None
     exit_reason: Optional[str] = None
     bars_held: int = 0
-    ambiguous_bar: bool = False    # stop and target both inside one bar's range
+    # the exit depended on an intrabar order OHLC cannot show: stop and target
+    # inside one bar, or a stop entry's fill bar that also spans the stop
+    ambiguous_bar: bool = False
+    # last bar the ENTRY order was working: its fill bar, or the bar it was
+    # cancelled on. With exit_time, this says when the setup was free again.
+    order_end: Optional[datetime] = None
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +131,24 @@ def _bar_delta(bars: pd.DataFrame) -> Optional[pd.Series]:
     if bars["buy_volume"].isna().all():
         return None
     return bars["buy_volume"] - bars["sell_volume"]
+
+
+def _low_volume_node(profile: Optional[Profile], anchor: float, sign: int, tick: float,
+                     furthest: float) -> Optional[float]:
+    """First price past `anchor`, moving against the trade, where under
+    S3_LVN_MAX_FRAC_OF_POC of the POC's volume has traded; None if there is
+    none out to `furthest`. Thin prices are where the market moved fast and
+    left no inventory, so price returning there has nothing to hold it."""
+    if profile is None:
+        return None
+    vols = {int(round(p / tick)): v for p, v in profile.bins.items()}
+    thin = S3_LVN_MAX_FRAC_OF_POC * max(vols.values())
+    k, last = int(round(anchor / tick)) - sign, int(round(furthest / tick))
+    while sign * (k - last) >= 0:
+        if vols.get(k, 0.0) < thin:
+            return k * tick
+        k -= sign
+    return None
 
 
 def _clamp_stop(entry: float, raw_stop: float, sign: int,
@@ -131,80 +167,200 @@ def _clamp_stop(entry: float, raw_stop: float, sign: int,
 
 def generate_s1(
     bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
+    news: Optional[NewsCalendar] = None,
 ) -> list[Signal]:
     """Break of the IB between 10:00 and 11:30, entered on the retest.
 
-    State machine: WAITING -> BROKEN (close beyond the IB edge) -> RETEST
-    (price returns to the edge without re-entering by more than
-    S1_RETEST_MAX_REENTRY_PTS) -> emit.
+    State machine: WAITING -> BROKEN (close crosses the IB edge from inside)
+    -> RETEST (price returns to the edge without closing back inside by more
+    than S1_RETEST_MAX_REENTRY_PTS) -> emit.
+
+    A break is a *crossing*. Price that stays beyond the edge after a signal,
+    a failed retest, or a stand-down is still the same break; re-arming on
+    every close beyond the edge would log one idea as several correlated
+    trades and overweight whichever sessions hovered there.
+
+    Stand-downs. On days carrying any release in S1_NEWS_EVENTS nothing is
+    emitted before S1_NEWS_STAND_DOWN_UNTIL; `news` is that calendar. Without
+    one — or on a session the calendar does not cover — the stand-down cannot
+    be verified, so earlier signals carry no_news_stand_down=None.
+
+    A gap open beyond GAP_OPEN_PCT of the prior close is a different regime,
+    but since the 2026-09-15 amendment it is not a checklist condition: the
+    trade is kept, and context["gap_pct"] lets the report show those sessions
+    on their own.
     """
+    return [s for s in _ib_break_signals(bars, lv, contract, news) if s.setup == "IB_BREAK"]
+
+
+def generate_ib_fail(
+    bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
+    news: Optional[NewsCalendar] = None,
+) -> list[Signal]:
+    """The S1 break whose retest fails, traded the other way (added 2026-09-15).
+
+    Protocol §05: "The false break that reverses back through the entire IB.
+    Log those as IB_FAIL." Waiting for the whole IB to be crossed would be
+    chasing, so the trigger is the moment the break is known to have failed:
+    the first bar in S1_BREAK_WINDOW that closes more than
+    S1_RETEST_MAX_REENTRY_PTS back inside — exactly the condition that ends
+    an S1 break. S1 and IB_FAIL share one walk of the tape, so a break yields
+    at most one of them: S1 if a retest held first, IB_FAIL if it failed.
+
+    Entry is a stop order 1 tick beyond the failure bar's far end (proof, not
+    anticipation). The stop sits IB_FAIL_STOP_BEYOND_EXTREME_PTS beyond the
+    false break's extreme; structure wider than IB_FAIL_STOP_CAP_PTS is no
+    trade. S1's gate, news stand-down and gap flag apply unchanged.
+    """
+    return [s for s in _ib_break_signals(bars, lv, contract, news) if s.setup == "IB_FAIL"]
+
+
+def _ib_break_signals(
+    bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
+    news: Optional[NewsCalendar],
+) -> list[Signal]:
+    """One walk of the S1 window emitting both IB_BREAK and IB_FAIL signals."""
     out: list[Signal] = []
-    if not lv.s1_gate():
+    if not lv.s1_gate() or lv.point_scale is None:
         return out
+    # ES-point thresholds in this tape's points (1.0 on futures)
+    k = lv.point_scale
+    reentry_tol = S1_RETEST_MAX_REENTRY_PTS * k
+    s1_beyond, s1_floor, s1_cap = (S1_STOP_BEYOND_SWING_PTS * k, S1_STOP_FLOOR_PTS * k,
+                                   S1_STOP_CAP_PTS * k)
+    fail_beyond, fail_floor, fail_cap = (IB_FAIL_STOP_BEYOND_EXTREME_PTS * k,
+                                         IB_FAIL_STOP_FLOOR_PTS * k, IB_FAIL_STOP_CAP_PTS * k)
 
     rth = rth_slice(bars, lv.date)
-    win = rth[_between(rth.index, *S1_BREAK_WINDOW)]
+    win_mask = _between(rth.index, *S1_BREAK_WINDOW)
+    win = rth[win_mask]
     if win.empty:
         return out
+    prev_close = rth["close"].shift(1)[win_mask].to_numpy()
 
     delta = _bar_delta(rth)
     cum = delta.cumsum() if delta is not None else None
+    news_day = None if news is None else news.is_news_day(lv.date, S1_NEWS_EVENTS)
+
+    def news_status(ts: pd.Timestamp) -> Optional[bool]:
+        """True clear, False stand down, None unverifiable."""
+        if ts.time() >= S1_NEWS_STAND_DOWN_UNTIL:
+            return True
+        return None if news_day is None else not news_day
+
+    def context(break_i: int, **extra) -> dict:
+        return {"ib_high": lv.ib_high, "ib_low": lv.ib_low,
+                "ib_range_pts": lv.ib_range, "day_type": lv.day_type,
+                "on_range_pos": lv.on_range_pos,   # S5 as a covariate
+                "gap_pct": lv.gap_pct,
+                "break_time": str(win.index[break_i].time()),
+                "point_scale": k, **extra}
 
     state = "WAITING"
     direction: Optional[Direction] = None
     edge = np.nan
     break_i = -1
-    retest_extreme = np.nan
+    retest_extreme = np.nan   # swing an S1 stop goes beyond (pullback side)
+    break_extreme = np.nan    # furthest the break reached (an IB_FAIL stop's anchor)
+    s1_blocked = False        # S1 cannot trade this break (cap exceeded, or edge used)
+    # One S1 order and one IB_FAIL order per IB edge per session (amended
+    # 2026-09-15), keyed by break direction: LONG = the IB high, SHORT = the
+    # IB low. Price wobbling across an edge makes new crossings, but they are
+    # the same idea; on August 2026 ES the old rule sold one edge six times in
+    # an hour. The first order placed uses the edge, filled or not.
+    s1_used: set[str] = set()
+    fail_used: set[str] = set()
 
     for i, (ts, bar) in enumerate(win.iterrows()):
         if state == "WAITING":
-            if bar["close"] > lv.ib_high:
+            pc = prev_close[i]
+            if bar["close"] > lv.ib_high and not pc > lv.ib_high:
                 state, direction, edge, break_i = "BROKEN", "LONG", lv.ib_high, i
-            elif bar["close"] < lv.ib_low:
+            elif bar["close"] < lv.ib_low and not pc < lv.ib_low:
                 state, direction, edge, break_i = "BROKEN", "SHORT", lv.ib_low, i
             if state == "BROKEN":
                 # anchor is the swing the stop goes BEYOND: the pullback low on
                 # a long break, the pullback high on a short one.
                 retest_extreme = bar["low"] if direction == "LONG" else bar["high"]
+                break_extreme = bar["high"] if direction == "LONG" else bar["low"]
+                s1_blocked = direction in s1_used
             continue
 
         sign = 1 if direction == "LONG" else -1
         if direction == "LONG":
             retest_extreme = min(retest_extreme, bar["low"])
+            break_extreme = max(break_extreme, bar["high"])
         else:
             retest_extreme = max(retest_extreme, bar["high"])
+            break_extreme = min(break_extreme, bar["low"])
 
-        # failure: price re-entered the IB by more than the tolerance
-        reentry = (edge - bar["low"]) if direction == "LONG" else (bar["high"] - edge)
-        if reentry > S1_RETEST_MAX_REENTRY_PTS:
+        # failure: a bar CLOSED back inside the IB by more than the tolerance.
+        # A wick deeper inside that closes within it is a retest that held
+        # (amended 2026-09-15); the wick still sets the swing the stop goes beyond.
+        reentry = (edge - bar["close"]) if direction == "LONG" else (bar["close"] - edge)
+        if reentry > reentry_tol:
+            fail_news = news_status(ts)
+            if fail_news is not False and direction not in fail_used:
+                fail_sign = -sign
+                entry = float(bar["low"] - contract.tick) if fail_sign < 0 \
+                    else float(bar["high"] + contract.tick)
+                raw_stop = break_extreme - fail_sign * fail_beyond
+                stop = _clamp_stop(entry, raw_stop, fail_sign,
+                                   fail_floor, fail_cap)
+                if stop is not None:
+                    out.append(Signal(
+                        setup="IB_FAIL", session_date=lv.date,
+                        direction="SHORT" if fail_sign < 0 else "LONG",
+                        signal_time=ts, entry_px=entry, stop_px=stop, entry_style="STOP",
+                        checklist={
+                            "ib_range_in_band": True,
+                            "break_in_window": True,
+                            "failed_in_window": True,
+                            "stop_within_cap": True,
+                            "no_news_stand_down": fail_news,
+                        },
+                        context=context(break_i, failed_break_extreme=float(break_extreme)),
+                    ))
+                    fail_used.add(direction)
             state, direction = "WAITING", None
             continue
 
         # retest: this bar traded back to the edge without breaking the tolerance
         touched = (bar["low"] <= edge) if direction == "LONG" else (bar["high"] >= edge)
-        if not touched or i == break_i:
+        if s1_blocked or not touched or i == break_i:
             continue
 
+        news_ok = news_status(ts)
+        if news_ok is False:
+            continue                          # stand down; the break stays armed
+
         # delta confirmation: cumulative delta made a new session extreme in the
-        # break direction within N bars of the break
+        # break direction on the break bar or within N bars after it. Only bars
+        # through the current one are visible. While that window is still open
+        # and unconfirmed the condition is pending, not failed — a later retest
+        # bar may complete it — so nothing is emitted yet.
         delta_ok: Optional[bool] = None
         if cum is not None:
             b_ts = win.index[break_i]
-            window_end = min(break_i + S1_DELTA_CONFIRM_BARS + 1, len(win))
-            seg = cum.loc[b_ts:win.index[window_end - 1]]
-            prior = cum.loc[:b_ts]
+            last_i = min(break_i + S1_DELTA_CONFIRM_BARS, i)
+            seg = cum.loc[b_ts:win.index[last_i]]
+            prior = cum[cum.index < b_ts]
             if len(seg) and len(prior):
                 delta_ok = bool(seg.max() > prior.max()) if direction == "LONG" \
                     else bool(seg.min() < prior.min())
+            if delta_ok is False and i < break_i + S1_DELTA_CONFIRM_BARS:
+                continue
 
         entry = edge + sign * contract.tick
-        raw_stop = retest_extreme - sign * 1.0   # 1 pt beyond the retest swing
+        raw_stop = retest_extreme - sign * s1_beyond
         # the swing must be on the correct side of entry to be a stop at all
         if sign * (entry - raw_stop) <= 0:
-            raw_stop = entry - sign * S1_STOP_FLOOR_PTS
-        stop = _clamp_stop(entry, raw_stop, sign, S1_STOP_FLOOR_PTS, S1_STOP_CAP_PTS)
+            raw_stop = entry - sign * s1_floor
+        stop = _clamp_stop(entry, raw_stop, sign, s1_floor, s1_cap)
         if stop is None:
-            state, direction = "WAITING", None
+            # The swing only gets wider on later bars, so S1 is done with this
+            # break — but it stays armed, because it can still fail (IB_FAIL).
+            s1_blocked = True
             continue
 
         out.append(Signal(
@@ -216,14 +372,11 @@ def generate_s1(
                 "delta_confirmed": delta_ok,
                 "retest_held": True,
                 "stop_within_cap": True,
+                "no_news_stand_down": news_ok,
             },
-            context={
-                "ib_high": lv.ib_high, "ib_low": lv.ib_low,
-                "ib_range_pts": lv.ib_range, "day_type": lv.day_type,
-                "on_range_pos": lv.on_range_pos,   # S5 as a covariate
-                "break_time": str(win.index[break_i].time()),
-            },
+            context=context(break_i),
         ))
+        s1_used.add(direction)
         state, direction = "WAITING", None   # one signal per break sequence
     return out
 
@@ -240,7 +393,7 @@ def _otf_confirm_time(rth: pd.DataFrame, cutoff: time) -> Optional[pd.Timestamp]
     agg = {"open": "first", "high": "max", "low": "min",
            "close": "last", "volume": "sum"}
     pre = rth.between_time(RTH_OPEN, cutoff, inclusive="left")
-    b30 = pre.resample("30min").agg(agg).dropna(subset=["open"])
+    b30 = pre.resample(f"{OTF_BAR_MINUTES}min").agg(agg).dropna(subset=["open"])
     if len(b30) < S3_MIN_OTF_BARS + 1:
         return None
     hh, hl = b30["high"].diff() > 0, b30["low"].diff() > 0
@@ -252,22 +405,78 @@ def _otf_confirm_time(rth: pd.DataFrame, cutoff: time) -> Optional[pd.Timestamp]
         run_d = run_d + 1 if dn[k] else 0
         if max(run_u, run_d) >= S3_MIN_OTF_BARS:
             # confirmable only once that 30-min bar has closed
-            return b30.index[k] + pd.Timedelta(minutes=30)
+            return b30.index[k] + pd.Timedelta(minutes=OTF_BAR_MINUTES)
     return None
+
+
+def _delta_extreme_in_confirming_bar(delta: Optional[pd.Series],
+                                     confirm_at: pd.Timestamp,
+                                     direction: Direction) -> Optional[bool]:
+    """Did cumulative delta make a new session extreme, in the trend's
+    direction, during the 30-minute bar that confirmed one-timeframing?
+
+    Read at the same resolution as the price condition it accompanies: price
+    one-timeframes when a 30-minute bar extends the range; flow agrees when
+    that same bar carries cumulative delta to a new session extreme. Demanding
+    the extreme on the last minute before confirmation failed trend days whose
+    buying paused for a minute or two.
+
+    Direction matters: an up-trend whose delta high was set earlier and not
+    exceeded in the confirming bar has stopped agreeing with price. None when
+    there is no delta, or no bars before the confirming bar to compare with.
+    """
+    if delta is None:
+        return None
+    cum = delta.cumsum()
+    bar_start = confirm_at - pd.Timedelta(minutes=OTF_BAR_MINUTES)
+    before = cum[cum.index < bar_start]
+    during = cum[(cum.index >= bar_start) & (cum.index < confirm_at)]
+    if before.empty or during.empty:
+        return None
+    if direction == "LONG":
+        return bool(during.max() > before.max())
+    return bool(during.min() < before.min())
 
 
 def generate_s3(
     bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
     entry_style: EntryStyle = "LIMIT",
 ) -> list[Signal]:
-    """Pullback to session VWAP on a confirmed trend day.
+    """Pullback to session VWAP or the developing value-area edge on a confirmed
+    trend day.
 
-    `entry_style` is pre-registered per the protocol: LIMIT at VWAP, or STOP
-    beyond the pullback bar's extreme. Pick one and never mix within a sample.
+    Day gate, all confirmed before any entry: opened outside prior value,
+    one-timeframing on 30-minute bars, and cumulative delta at a session
+    extreme with price — read as a new session extreme during the 30-minute
+    bar that confirmed one-timeframing. A gate condition known to fail
+    returns []; one the data cannot check (no delta) is recorded as None and
+    flags every signal.
+
+    Stand-downs are enforced bar by bar: no entries after S3_ENTRY_CUTOFF, and
+    none once VWAP has been crossed more than S3_MAX_VWAP_CROSSES times — that
+    count keeps running after the 11:00 classification, because an afternoon
+    of chop is exactly the balance day in a trend costume the rule exists for.
+
+    A pullback is a bar whose low (high, for a short) comes within
+    S3_VWAP_TOLERANCE_PTS of VWAP or S3_VA_EDGE_TOLERANCE_PTS of the developing
+    value-area edge — the top of today's value for a long, the bottom for a
+    short, from the session profile through that bar (amended 2026-09-15).
+
+    The stop sits 1 tick beyond the low-volume node under the pullback: the
+    first price past the pullback (and entry) where under
+    S3_LVN_MAX_FRAC_OF_POC of the busiest price's volume has traded today.
+    No node within S3_STOP_CAP_PTS is no trade (amended 2026-09-15).
+
+    `entry_style` is pre-registered per the protocol: LIMIT at the level the
+    pullback reached (VWAP when it reached both), or STOP beyond the pullback
+    bar's extreme. Pick one and never mix within a sample.
     """
     out: list[Signal] = []
-    if not lv.s3_gate():
+    if not lv.s3_gate() or lv.point_scale is None:
         return out
+    k = lv.point_scale                       # ES points -> this tape's points
+    vwap_tol, edge_tol = S3_VWAP_TOLERANCE_PTS * k, S3_VA_EDGE_TOLERANCE_PTS * k
+    stop_floor, stop_cap = S3_STOP_FLOOR_PTS * k, S3_STOP_CAP_PTS * k
 
     rth = rth_slice(bars, lv.date)
     confirm_at = _otf_confirm_time(rth, lv.classified_at)
@@ -278,6 +487,11 @@ def generate_s3(
     sign = 1 if direction == "LONG" else -1
     vwap = lv.vwap
     delta = _bar_delta(rth)
+
+    delta_at_extreme = _delta_extreme_in_confirming_bar(delta, confirm_at, direction)
+    if delta_at_extreme is False:
+        return out
+    crosses = running_crosses(rth["close"], vwap)
 
     tradeable = rth[(rth.index >= confirm_at)
                     & (rth.index.time < S3_ENTRY_CUTOFF)]
@@ -290,14 +504,42 @@ def generate_s3(
     # for the first one) to the start of the current pullback
     last_touch_i = 0
     idx_all = rth.index
+    # A pullback is price coming back TO a level, so before this bar price must
+    # have been beyond where the level is NOW by more than the tolerance —
+    # measured from the open, or from the last signal. Without it, a steady
+    # climb whose value-area high rides at the session high "pulls back"
+    # without moving, a value area rising into a flat afternoon looks like a
+    # pullback, and a pullback resting on VWAP re-signals every few bars.
+    before = rth[rth.index < tradeable.index[0]]
+    run_extreme = np.nan if before.empty else \
+        float(before["high"].max() if direction == "LONG" else before["low"].min())
+
+    def came_back(level: Optional[float], probe: float, reached: float, tol: float) -> bool:
+        return (level is not None and not np.isnan(reached)
+                and sign * (reached - level) > tol and abs(probe - level) <= tol)
 
     for ts, bar in tradeable.iterrows():
         i = idx_all.get_loc(ts)
+        reached = run_extreme                # trend-side extreme of earlier bars
+        trend_side = bar["high"] if direction == "LONG" else bar["low"]
+        run_extreme = trend_side if np.isnan(run_extreme) else \
+            (max(run_extreme, trend_side) if direction == "LONG" else min(run_extreme, trend_side))
+        if crosses[i] > S3_MAX_VWAP_CROSSES:
+            break                            # stand down for the rest of the session
         v = vwap.iloc[i]
         if np.isnan(v):
             continue
-        near = (abs(bar["low"] - v) <= S3_VWAP_TOLERANCE_PTS) if direction == "LONG" \
-            else (abs(bar["high"] - v) <= S3_VWAP_TOLERANCE_PTS)
+        # the pullback's leading edge: the low on a long, the high on a short
+        probe = bar["low"] if direction == "LONG" else bar["high"]
+        # developing value area: today's profile through this bar, which has
+        # closed. A long pulls back to the top of value, a short to the bottom.
+        developing = volume_profile(rth.iloc[:i + 1], tick=contract.tick)
+        va_edge = None if developing is None else \
+            (developing.vah if direction == "LONG" else developing.val)
+
+        near_vwap = came_back(float(v), probe, reached, vwap_tol)
+        near_edge = came_back(va_edge, probe, reached, edge_tol)
+        near = near_vwap or near_edge
 
         if not near:
             if in_pullback:
@@ -328,18 +570,27 @@ def generate_s3(
         if vol_declining is not True:
             continue
 
+        level = "VWAP" if near_vwap else "VA_EDGE"
         if entry_style == "LIMIT":
-            entry = float(v)
+            # rest at the level the pullback reached; VWAP when it reached both
+            entry = float(v) if near_vwap else float(va_edge)
         else:
             entry = float(bar["high"] + contract.tick) if direction == "LONG" \
                 else float(bar["low"] - contract.tick)
 
         pb_extreme = float(pullback["low"].min()) if direction == "LONG" \
             else float(pullback["high"].max())
-        raw_stop = pb_extreme - sign * contract.tick
-        if sign * (entry - raw_stop) <= 0:
-            raw_stop = entry - sign * S3_STOP_FLOOR_PTS
-        stop = _clamp_stop(entry, raw_stop, sign, S3_STOP_FLOOR_PTS, S3_STOP_CAP_PTS)
+        # "Beyond the low-volume node under the pullback": search from whichever
+        # of the pullback extreme and the entry is further from the trade, so the
+        # stop is always on the losing side of entry.
+        anchor = min(pb_extreme, entry) if direction == "LONG" else max(pb_extreme, entry)
+        node = _low_volume_node(developing, anchor, sign, contract.tick,
+                                furthest=entry - sign * (stop_cap - contract.tick))
+        if node is None:
+            in_pullback = False              # nothing thin within the cap: no trade
+            continue
+        stop = _clamp_stop(entry, node - sign * contract.tick, sign,
+                           stop_floor, stop_cap)
         if stop is None:
             in_pullback = False
             continue
@@ -347,23 +598,34 @@ def generate_s3(
         out.append(Signal(
             setup="VWAP_CONT", session_date=lv.date, direction=direction,
             signal_time=ts, entry_px=entry, stop_px=stop, entry_style=entry_style,
+            entry_deadline=S3_ENTRY_CUTOFF,
             checklist={
-                "day_gate_confirmed": True,
-                "pullback_to_vwap": True,
+                "opened_outside_value": True,       # s3_gate
+                "one_timeframing": True,            # s3_gate, at confirm_at
+                "delta_at_extreme": delta_at_extreme,
+                "vwap_crosses_ok": True,            # enforced bar by bar above
+                "pullback_to_level": True,          # VWAP or developing VA edge
                 "volume_declining": vol_declining,
                 "counter_delta_ok": counter_ok,
                 "stop_within_cap": True,
             },
             context={
-                "vwap": float(v), "day_type": lv.day_type,
+                "vwap": float(v), "pullback_level": level,
+                "va_edge": None if va_edge is None else float(va_edge),
+                "low_volume_node": node,
+                "day_type": lv.day_type,
+                "ib_range_pts": lv.ib_range,
                 "otf_bars": max(lv.otf_up_bars, lv.otf_down_bars),
-                "vwap_crosses": lv.vwap_crosses,
+                "vwap_crosses": int(crosses[i]),
                 "on_range_pos": lv.on_range_pos,
+                "gap_pct": lv.gap_pct,
                 "confirmed_at": str(confirm_at.time()),
+                "point_scale": k,
             },
         ))
         in_pullback = False
         last_touch_i = i
+        run_extreme = np.nan                 # price must leave again before the next pullback
     return out
 
 
@@ -372,7 +634,7 @@ def generate_s3(
 # ---------------------------------------------------------------------------
 
 def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
-             max_wait_bars: int = 30) -> Fill:
+             max_wait_bars: int = ENTRY_MAX_WAIT_BARS) -> Fill:
     """Walk forward from the signal bar and resolve entry then exit.
 
     See FILL CONVENTIONS in the module docstring. They are intentionally
@@ -386,10 +648,14 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
     sign = signal.sign
     entry_px: Optional[float] = None
     entry_time = None
+    order_end = signal.signal_time      # nothing has rested yet
 
     for j, (ts, bar) in enumerate(after.iterrows()):
         if j >= max_wait_bars:
             break
+        if signal.entry_deadline is not None and ts.time() >= signal.entry_deadline:
+            break                       # stand-down reached: the order is cancelled
+        order_end = ts                  # the order was working through this bar
         if signal.entry_style == "LIMIT":
             # must trade strictly through the limit, not merely touch it
             hit = bar["low"] < signal.entry_px if sign > 0 else bar["high"] > signal.entry_px
@@ -404,10 +670,25 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
                 break
 
     if entry_px is None:
-        return Fill(signal, filled=False)
+        return Fill(signal, filled=False, order_end=order_end)
 
     risk = abs(entry_px - signal.stop_px)
     target = entry_px + sign * MECHANICAL_TARGET_R * risk
+
+    # The fill bar is checked for the stop and never for the target. A limit
+    # long fills on the way down, so a fill bar whose low also takes out the
+    # stop was stopped on that same move — certain, not ambiguous. A stop
+    # entry's bar could have printed the stop before the trigger; the order
+    # is unknowable, so the loss is assumed and the bar flagged. Either way,
+    # skipping the fill bar would let a later bar score a TARGET on a trade
+    # that was already dead.
+    fill_bar = after.loc[entry_time]
+    if (fill_bar["low"] <= signal.stop_px) if sign > 0 \
+            else (fill_bar["high"] >= signal.stop_px):
+        return Fill(signal, True, entry_time, entry_px, entry_time,
+                    signal.stop_px, "STOP", 0, signal.entry_style == "STOP",
+                    order_end=entry_time)
+
     held = 0
     ambiguous = False
 
@@ -419,27 +700,49 @@ def simulate(signal: Signal, bars: pd.DataFrame, contract: Contract,
             ambiguous = True
         if hit_stop:                                  # stop wins ties, always
             return Fill(signal, True, entry_time, entry_px, ts, signal.stop_px,
-                        "STOP", held, ambiguous)
+                        "STOP", held, ambiguous, order_end=entry_time)
         if hit_tgt:
             return Fill(signal, True, entry_time, entry_px, ts, target,
-                        "TARGET", held, ambiguous)
+                        "TARGET", held, ambiguous, order_end=entry_time)
 
     last_ts, last_bar = rth.index[-1], rth.iloc[-1]
     return Fill(signal, True, entry_time, entry_px, last_ts,
-                float(last_bar["close"]), "TIME", held, ambiguous)
+                float(last_bar["close"]), "TIME", held, ambiguous, order_end=entry_time)
+
+
+def _simulate_one_position_per_setup(signals: Sequence[Signal], bars: pd.DataFrame,
+                                     contract: Contract) -> list[Fill]:
+    """Resolve signals in time order, skipping any that arrives while its setup
+    still has an order working or a position open (amended 2026-09-15).
+
+    One position at a time per setup is what a trader following the checklist
+    does. Stacking the same idea logs correlated trades as independent ones:
+    on the August 2026 ES tape four S1 shorts at one price were open at once.
+    """
+    busy: dict[str, pd.Timestamp] = {}
+    out: list[Fill] = []
+    for signal in sorted(signals, key=lambda s: s.signal_time):
+        until = busy.get(signal.setup)
+        if until is not None and signal.signal_time < until:
+            continue
+        fill = simulate(signal, bars, contract)
+        busy[signal.setup] = fill.exit_time if fill.filled else fill.order_end
+        out.append(fill)
+    return out
 
 
 def run_session(bars: pd.DataFrame, lv: SessionLevels, contract: Contract,
-                s3_entry_style: EntryStyle = "LIMIT") -> list[Fill]:
-    signals = generate_s1(bars, lv, contract) + \
+                s3_entry_style: EntryStyle = "LIMIT",
+                news: Optional[NewsCalendar] = None) -> list[Fill]:
+    signals = _ib_break_signals(bars, lv, contract, news) + \
         generate_s3(bars, lv, contract, entry_style=s3_entry_style)
-    signals.sort(key=lambda s: s.signal_time)
-    return [simulate(s, bars, contract) for s in signals]
+    return _simulate_one_position_per_setup(signals, bars, contract)
 
 
 def run_all(bars: pd.DataFrame, sessions: Sequence[SessionLevels],
-            contract: Contract, s3_entry_style: EntryStyle = "LIMIT") -> list[Fill]:
+            contract: Contract, s3_entry_style: EntryStyle = "LIMIT",
+            news: Optional[NewsCalendar] = None) -> list[Fill]:
     fills: list[Fill] = []
     for lv in sessions:
-        fills.extend(run_session(bars, lv, contract, s3_entry_style))
+        fills.extend(run_session(bars, lv, contract, s3_entry_style, news))
     return fills
